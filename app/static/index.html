@@ -1972,6 +1972,7 @@
   function hideAuthModal() {
     const overlay = document.getElementById('auth-overlay');
     if (overlay) overlay.classList.remove('show');
+    checkHealth();
   }
 
   function switchAuthTab(tab) {
