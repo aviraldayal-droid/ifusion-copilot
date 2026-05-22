@@ -1077,11 +1077,8 @@ MARGINS / PROFITABILITY QUERIES:
     SELECT
       ROUND(MAX(CASE WHEN metric = 'EBITDA' THEN total END)::numeric, 0)  AS ebitda_m_fcfa,
       ROUND(MAX(CASE WHEN metric = 'Mobile' THEN total END)::numeric, 0)  AS ca_mobile_m_fcfa,
-      ROUND(
-        MAX(CASE WHEN metric = 'EBITDA' THEN total END) * 100.0
-        / NULLIF(MAX(CASE WHEN metric = 'Mobile' THEN total END), 0),
-        2
-      )                                                                    AS ebitda_margin_pct
+      ROUND((MAX(CASE WHEN metric = 'EBITDA' THEN total END)::numeric * 100.0
+        / NULLIF(MAX(CASE WHEN metric = 'Mobile' THEN total END)::numeric, 0)), 2) AS ebitda_margin_pct
     FROM q_data;
 
   JOIN KEY: financial_metrics_data → revenue_raw_data (for CA Global):
