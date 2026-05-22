@@ -74,3 +74,4 @@ oc.py
 
 # ── Claude Code internals ─────────────────────────────────────────────────────
 .claude/
+github_token.txt

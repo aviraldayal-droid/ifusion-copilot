@@ -2580,13 +2580,16 @@
     const dot  = document.getElementById('status-dot');
     const text = document.getElementById('status-text');
     try {
-      const r = await fetch(`${API}/api/v1/db/health`);
+      const ctrl = new AbortController();
+      const tid  = setTimeout(() => ctrl.abort(), 8000);
+      const r    = await fetch(`${API}/api/v1/db/health`, { signal: ctrl.signal });
+      clearTimeout(tid);
       if (r.ok) {
         const d = await r.json();
         dot.className = 'dot ok';
         text.textContent = (d.monthly_data_rows ?? 0).toLocaleString() + ' rows live';
       } else throw new Error();
-    } catch { dot.className = 'dot err'; text.textContent = 'Unreachable'; }
+    } catch { dot.className = 'dot err'; text.textContent = 'DB Unreachable'; }
   }
   checkHealth();
 

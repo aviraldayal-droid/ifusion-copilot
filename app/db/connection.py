@@ -24,6 +24,8 @@ def get_pool() -> pg_pool.ThreadedConnectionPool:
         if 'sslmode' not in dsn:
             sep = '&' if '?' in dsn else '?'
             dsn += f'{sep}sslmode=disable'
+        if 'connect_timeout' not in dsn:
+            dsn += '&connect_timeout=5'
         _pool = pg_pool.ThreadedConnectionPool(
             minconn=1,
             maxconn=10,
