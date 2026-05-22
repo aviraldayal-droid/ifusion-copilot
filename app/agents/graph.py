@@ -971,6 +971,50 @@ MARGINS / PROFITABILITY QUERIES:
     GROUP BY fm.name
     ORDER BY total_fcfa DESC;
 
+  ✓ P&L monthly breakdown for a year (e.g. "P&L month by month 2025", "P&L breakdown monthly"):
+    — returns one row per month with total actual, budget, prior year across all P&L metrics
+    — NEVER add AND fmd.budget_value IS NOT NULL here — early months may have no budget yet
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT EXTRACT(MONTH FROM fmd.date)::int             AS month,
+           ROUND(SUM(fmd.real_value)::numeric, 0)        AS actual_m_fcfa,
+           ROUND(SUM(fmd.budget_value)::numeric, 0)      AS budget_m_fcfa,
+           ROUND(SUM(fmd.last_year_real_value)::numeric, 0) AS prior_year_m_fcfa,
+           ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance_m_fcfa
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name = 'P&L conso'
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
+      AND fmd.real_value IS NOT NULL
+    GROUP BY EXTRACT(MONTH FROM fmd.date)
+    ORDER BY month;
+
+  ✓ P&L monthly breakdown by KPI type (e.g. "P&L breakdown by category per month 2025"):
+    — returns one row per month per P&L type (revenue, EBITDA, etc.)
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT EXTRACT(MONTH FROM fmd.date)::int             AS month,
+           ft.name                                       AS pnl_type,
+           ROUND(SUM(fmd.real_value)::numeric, 0)        AS actual_m_fcfa,
+           ROUND(SUM(fmd.budget_value)::numeric, 0)      AS budget_m_fcfa
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name = 'P&L conso'
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
+      AND fmd.real_value IS NOT NULL
+    GROUP BY EXTRACT(MONTH FROM fmd.date), ft.name
+    ORDER BY month, pnl_type;
+
   ✗ Do NOT invent a "margin" column — it does not exist. Always JOIN to financial_metric.name.
   ✗ Do NOT use fc.name = 'Marge brute Mobile' for margin % — that category stores costs, not %.
 
