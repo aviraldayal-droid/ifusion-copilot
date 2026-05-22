@@ -2598,6 +2598,7 @@
     } catch { sel.innerHTML = '<option value="">Could not load models</option>'; }
   }
   loadModels();
+  checkApiKeyStatus();
 
   // ── Theme ────────────────────────────────────────────
   // ── Settings dropdown ─────────────────────────────────
@@ -2615,6 +2616,34 @@
     if (!wrap) document.getElementById('settings-dropdown')?.classList.remove('open');
   });
 
+  function _setApiKeyRequired(required) {
+    const input   = document.getElementById('user-input');
+    const sendBtn = document.getElementById('send-btn');
+    const alertEl = document.getElementById('alert-panel');
+    if (required) {
+      input.disabled   = true;
+      input.placeholder = 'Enter your Ollama API key in Settings ⚙ to continue…';
+      sendBtn.disabled  = true;
+      alertEl.style.display = 'block';
+      alertEl.innerHTML = '<span style="color:var(--accent);font-weight:600;">⚙ API key required</span> — click the gear icon in the top-right to enter your Ollama Cloud API key.';
+    } else {
+      input.disabled    = false;
+      input.placeholder = 'Message iFusion Copilot…';
+      sendBtn.disabled  = false;
+      alertEl.style.display = 'none';
+      alertEl.innerHTML = '';
+    }
+  }
+
+  async function checkApiKeyStatus() {
+    try {
+      const r = await fetch(`${API}/api/v1/settings`);
+      if (!r.ok) return;
+      const d = await r.json();
+      _setApiKeyRequired(!d.has_api_key);
+    } catch (_) {}
+  }
+
   async function saveOllamaApiKey() {
     const key   = document.getElementById('ollama-api-key-input').value.trim();
     const status = document.getElementById('settings-status');
@@ -2629,6 +2658,7 @@
       status.style.color = 'var(--accent)';
       status.textContent = key ? 'API key saved ✓' : 'API key cleared ✓';
       document.getElementById('ollama-api-key-input').value = '';
+      _setApiKeyRequired(!key);
       setTimeout(() => document.getElementById('settings-dropdown')?.classList.remove('open'), 1200);
     } catch (e) {
       status.style.color = '#ef4444';
