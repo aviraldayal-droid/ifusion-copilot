@@ -2939,12 +2939,15 @@ Classify the user's question as exactly one of these five labels:
 The question may be in English OR French. Classify based on meaning, not language.
 
 KEY RULES:
-- Any question containing a YEAR (2024, 2025, etc.) is data_query, never definition.
-- Any question asking for a comparison, trend, breakdown, or "vs" is data_query.
-- "What is X for 2025?" → data_query (the year makes it a data request)
-- "What is X?" with NO year or data context → definition
-- Use "both" ONLY when the question explicitly says "what is X AND show me data" in the same sentence.
-  Do NOT use "both" just because a question mentions a financial term.
+- If the question asks for actual numbers, values, trends, comparisons, or a specific period
+  (e.g. "for 2025", "in Q1", "monthly", "vs budget") → data_query.
+- If the question asks only "what is X?" or "define X" with no request for values → definition.
+- "What is X for 2025?" where the intent is to get the metric value → data_query.
+- "What is X?" where the intent is to understand the meaning of X → definition.
+- "vs", "compared to", "breakdown", "trend", "monthly", "per month", "variance" → data_query.
+- Use "both" ONLY when the question EXPLICITLY asks for a definition AND data together,
+  e.g. "What is EBITDA and what was it in 2024?" Do NOT use "both" just because
+  a question mentions a financial term alongside a period.
 
 English examples:
   "What is CAPEX?"                                          → definition
