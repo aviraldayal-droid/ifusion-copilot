@@ -662,7 +662,75 @@ REVENUE BY SEGMENT — revenue_raw_data (DAILY DATA):
   ✗ Do NOT use financial_metrics_data for segment breakdown — it does not have ca_voix/ca_data columns.
   ✗ Do NOT use monthly_evolution for revenue values — it stores YoY evolution rates, not amounts.
 
-CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by month:
+CAPEX QUERIES — for questions about total CapEx, CapEx vs budget, CapEx trends, CapEx YoY:
+  Category: 'Capex Consolidés'. Same dedup CTE + JOIN path as OPEX/EBITDA (financial_metrics_data).
+
+  ⚠ TABLE SELECTION RULE:
+    • "total CapEx", "CapEx vs budget", "CapEx trend", "CapEx monthly", "CapEx YoY", "CapEx by type"
+      → use financial_metrics_data (has real_value, budget_value, last_year_real_value)
+    • "CapEx by supplier", "CapEx by project", "CapEx by direction", "which supplier"
+      → use capex_data JOIN capex_projects (see CAPEX HIERARCHY below)
+
+  ✓ Total CapEx for a year (e.g. "total CapEx for 2024", "what was CapEx in 2024?"):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT ROUND(SUM(fmd.real_value)::numeric, 0)           AS total_capex_m_fcfa,
+           ROUND(SUM(fmd.budget_value)::numeric, 0)          AS budget_m_fcfa,
+           ROUND(SUM(fmd.last_year_real_value)::numeric, 0)  AS prior_year_m_fcfa,
+           ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name = 'Capex Consolidés'
+      AND EXTRACT(YEAR FROM fmd.date) = 2024
+      AND fmd.real_value IS NOT NULL;
+
+  ✓ Monthly CapEx trend (e.g. "CapEx monthly trend 2024", "CapEx month by month"):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT EXTRACT(MONTH FROM fmd.date)::int             AS month,
+           ROUND(SUM(fmd.real_value)::numeric, 0)        AS total_capex_m_fcfa,
+           ROUND(SUM(fmd.budget_value)::numeric, 0)      AS budget_m_fcfa,
+           ROUND(SUM(fmd.last_year_real_value)::numeric, 0) AS prior_year_m_fcfa
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name = 'Capex Consolidés'
+      AND EXTRACT(YEAR FROM fmd.date) = 2024
+      AND fmd.real_value IS NOT NULL
+    GROUP BY EXTRACT(MONTH FROM fmd.date)
+    ORDER BY month;
+
+  ✓ CapEx breakdown by type for a year (e.g. "CapEx breakdown 2024", "CapEx by category"):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT ft.name AS capex_type,
+           ROUND(SUM(fmd.real_value)::numeric, 0)            AS actual_m_fcfa,
+           ROUND(SUM(fmd.budget_value)::numeric, 0)          AS budget_m_fcfa,
+           ROUND(SUM(fmd.last_year_real_value)::numeric, 0)  AS prior_year_m_fcfa,
+           ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name = 'Capex Consolidés'
+      AND EXTRACT(YEAR FROM fmd.date) = 2024
+      AND fmd.real_value IS NOT NULL
+    GROUP BY ft.name
+    ORDER BY actual_m_fcfa DESC;
+
+CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by direction:
   capex_projects: id [PK], supplier_name, direction_name, project_title, contract_no
   capex_data:     id [PK], capex_projects_id (FK → capex_projects.id), month, year,
                   equipment, services, additional_costs
