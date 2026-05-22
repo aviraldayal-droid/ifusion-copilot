@@ -2272,6 +2272,9 @@ STRICT RULES:
 - Reproduce the table AS-IS including all | characters.
 - NEVER output SQL, column types, or any technical internals.
 - NEVER invent numbers not present in the results or DATA FACTS.
+- NEVER compute variance %, growth %, or ratio % yourself — these MUST come from the result columns.
+  If no variance_pct / growth_pct / share_pct column exists in the result, do NOT mention percentages
+  in Summary or Key Insights. State absolute differences in M FCFA instead.
 - If a cell shows "(null)" → write "no data available". NEVER write "None" or "null".
 - Do NOT start with "I'm sorry", "Based on", "The query returned", or "Here is".
 - {language_instruction}
@@ -2731,6 +2734,49 @@ def _detect_quarterly_availability(rows: list[dict], cols: list[str]) -> str:
     return "QUARTERLY DATA AVAILABILITY: " + " | ".join(parts)
 
 
+def _ensure_table_present(answer: str, table: str) -> str:
+    """
+    The narration LLM sometimes drops the data table despite explicit instructions.
+    If the answer does not contain a markdown pipe table, inject the pre-built
+    ASCII table after the Summary section (or before Analysis if no Summary).
+    """
+    if not table:
+        return answer
+
+    has_table = False
+    for line in answer.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.count("|") >= 2:
+            has_table = True
+            break
+    if has_table:
+        return answer
+
+    # Inject right before the Analysis section if present, otherwise after Summary
+    lines = answer.splitlines()
+    insert_idx = None
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("**analysis**"):
+            insert_idx = i
+            break
+    if insert_idx is None:
+        for i, line in enumerate(lines):
+            if line.strip().lower().startswith("**summary**"):
+                # Find end of the Summary paragraph (next blank line or next bold heading)
+                j = i + 1
+                while j < len(lines) and lines[j].strip() and not lines[j].strip().startswith("**"):
+                    j += 1
+                insert_idx = j
+                break
+    if insert_idx is None:
+        # No structured headings found — append at the end
+        return f"{answer.rstrip()}\n\n{table}\n"
+
+    log.info("format_answer: injecting missing data table at line %d", insert_idx)
+    new_lines = lines[:insert_idx] + ["", table, ""] + lines[insert_idx:]
+    return "\n".join(new_lines)
+
+
 def _make_format_answer_node(llm: ChatOllama):
     def format_answer(state: DbPipelineState) -> dict:
         retry     = state.get("retry_count", 0)
@@ -2804,8 +2850,9 @@ def _make_format_answer_node(llm: ChatOllama):
                 )),
             ])
             log.info("format_answer LLM done in %.1fs", time.monotonic() - t0)
+            answer_text = _ensure_table_present(response.content, table)
             return {
-                "answer":      response.content,
+                "answer":      answer_text,
                 "chart_specs": [chart_spec] if chart_spec else [],
             }
         except Exception as llm_err:
