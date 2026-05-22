@@ -28,11 +28,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+import asyncio as _asyncio
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from app.auth.deps import get_optional_user
+from app.db.auth_store import create_conversation, save_message, touch_conversation
 
 _MODEL_LIST_PATH = Path(__file__).resolve().parent.parent.parent / "model_list.json"
+_THRESHOLDS_PATH = Path(__file__).resolve().parents[2] / "app" / "thresholds.json"
 
-from app.agents.graph import evict_graph, run_agent, run_db_agent, run_db_agent_stream
+from app.agents.graph import evict_graph, run_agent, run_agent_stream, run_db_agent, run_db_agent_stream
+from app.agents.tools import run_alerts_check
 from app.db.connection import execute as db_execute, ping as db_ping
 from app.db.schema_inspector import build_schema_context, inspect_schema, get_views
 from app.models.schemas import (
@@ -97,11 +103,23 @@ async def create_session(file: Annotated[UploadFile, File(description="TBG Excel
                    "Ensure it is a valid TBG Excel export.",
         )
 
+    all_periods = parsed.get("all_periods", [])
+    latest_period = all_periods[-1] if all_periods else ""
+    alerts: list[dict] = []
+    if latest_period:
+        try:
+            with open(_THRESHOLDS_PATH) as _tf:
+                thresholds = json.load(_tf)
+            alerts = run_alerts_check(parsed, thresholds, latest_period)
+        except Exception:
+            pass
+
     session_id = str(uuid.uuid4())
     _sessions[session_id] = {
         "session_id": session_id,
         "files": [upload_filename],
         "parsed_data": parsed,
+        "alerts": alerts,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -109,9 +127,10 @@ async def create_session(file: Annotated[UploadFile, File(description="TBG Excel
         session_id=session_id,
         file_name=upload_filename,
         sheets_parsed=list(parsed["sheets"].keys()),
-        periods_available=parsed.get("all_periods", []),
+        periods_available=all_periods,
         message=f"Session created. {len(parsed['sheets'])} reports parsed, "
-                f"{len(parsed.get('all_periods', []))} periods available.",
+                f"{len(all_periods)} periods available.",
+        alerts=alerts,
     )
 
 
@@ -171,11 +190,22 @@ async def create_comparison_session(
         "all_periods": all_periods_global,
     }
 
+    latest_period_global = all_periods_global[-1] if all_periods_global else ""
+    compare_alerts: list[dict] = []
+    if latest_period_global:
+        try:
+            with open(_THRESHOLDS_PATH) as _tf:
+                thresholds = json.load(_tf)
+            compare_alerts = run_alerts_check(merged_data, thresholds, latest_period_global)
+        except Exception:
+            pass
+
     session_id = str(uuid.uuid4())
     _sessions[session_id] = {
         "session_id": session_id,
         "files": [file1.filename, file2.filename],
         "parsed_data": merged_data,
+        "alerts": compare_alerts,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -187,6 +217,7 @@ async def create_comparison_session(
         periods_available=all_periods_global,
         message=f"Comparison session created. {len(merged_sheets)} sheets, "
                 f"{len(all_periods_global)} periods merged.",
+        alerts=compare_alerts,
     )
 
 
@@ -340,16 +371,33 @@ async def health():
 # POST /api/v1/db/chat
 # ---------------------------------------------------------------------------
 @router.post("/db/chat", response_model=ChatResponse)
-async def db_chat(request: ChatRequest):
+async def db_chat(
+    request: ChatRequest,
+    optional_user: dict | None = Depends(get_optional_user),
+):
     """
     Chat with the TBG AI Copilot backed by PostgreSQL.
     No file upload needed — the agent queries the database directly.
 
     Use conversation_id to maintain multi-turn history.
+    When authenticated, messages are persisted to the database.
     """
     # Use a fixed "db" session so the graph is shared across all DB chats
     # but each conversation_id gets its own thread in MemorySaver.
     session_id = "db-global"
+
+    # ── Persist user message if authenticated ──────────────────────────────
+    conv_id: int | None = request.conv_id
+    if optional_user:
+        if conv_id is None:
+            # Auto-create a conversation named after the first question
+            title = request.message[:80]
+            conv  = await _asyncio.to_thread(
+                create_conversation, optional_user["id"], title, "db"
+            )
+            conv_id = conv["id"]
+        await _asyncio.to_thread(save_message, conv_id, "user", request.message, {})
+
     try:
         result = await run_db_agent(
             session_id=session_id,
@@ -374,12 +422,65 @@ async def db_chat(request: ChatRequest):
         except Exception:
             pass
 
+    # ── Persist bot reply if authenticated ─────────────────────────────────
+    if optional_user and conv_id is not None:
+        bot_meta = {
+            "sql":            result.get("sql"),
+            "tables":         result.get("tables_queried"),
+            "inference_time": result.get("inference_time"),
+            "cache_hit":      result.get("cache_hit"),
+        }
+        await _asyncio.to_thread(save_message, conv_id, "bot", response_text, bot_meta)
+        await _asyncio.to_thread(touch_conversation, conv_id)
+
     return ChatResponse(
         response=response_text,
         charts=charts,
         conversation_id=request.conversation_id,
         session_id=session_id,
         inference_time=result.get("inference_time"),
+        sql=result.get("sql") or None,
+        tables_queried=result.get("tables_queried", []),
+        row_count=result.get("row_count"),
+        cache_hit=result.get("cache_hit", False),
+        conv_id=conv_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/sessions/{session_id}/chat/stream
+# ---------------------------------------------------------------------------
+@router.post("/sessions/{session_id}/chat/stream")
+async def session_chat_stream(session_id: str, request: ChatRequest):
+    """
+    Streaming version of /sessions/{id}/chat using Server-Sent Events.
+    """
+    session = _require_session(session_id)
+    parsed_data = session["parsed_data"]
+
+    async def event_generator():
+        try:
+            async for chunk in run_agent_stream(
+                session_id=session_id,
+                parsed_data=parsed_data,
+                message=request.message,
+                conversation_id=request.conversation_id,
+                model=request.model,
+                language=request.language,
+            ):
+                yield chunk
+        except Exception as exc:
+            import json as _j
+            yield f"event: error\ndata: {_j.dumps({'detail': str(exc)})}\n\n"
+
+    from fastapi.responses import StreamingResponse as _SR
+    return _SR(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -389,13 +490,32 @@ async def db_chat(request: ChatRequest):
 from fastapi.responses import StreamingResponse as FastAPIStreamingResponse
 
 @router.post("/db/chat/stream")
-async def db_chat_stream(request: ChatRequest):
+async def db_chat_stream(
+    request: ChatRequest,
+    optional_user: dict | None = Depends(get_optional_user),
+):
     """
     Streaming version of /db/chat using Server-Sent Events.
+    When authenticated, user and bot messages are persisted to the database
+    and the conv_id is injected into the final 'done' SSE event.
     """
+    import json as _json
+
     session_id = "db-global"
 
+    # Resolve / create conversation before streaming starts
+    conv_id: int | None = request.conv_id
+    if optional_user:
+        if conv_id is None:
+            title = request.message[:80]
+            conv  = await _asyncio.to_thread(
+                create_conversation, optional_user["id"], title, "db"
+            )
+            conv_id = conv["id"]
+        await _asyncio.to_thread(save_message, conv_id, "user", request.message, {})
+
     async def event_generator():
+        stream_answer = []
         try:
             async for chunk in run_db_agent_stream(
                 session_id=session_id,
@@ -404,10 +524,46 @@ async def db_chat_stream(request: ChatRequest):
                 model=request.model,
                 language=request.language,
             ):
-                yield chunk
+                # Intercept token events to collect the full answer
+                if chunk.startswith("event: token\n"):
+                    try:
+                        data_line = [l for l in chunk.split("\n") if l.startswith("data: ")][0]
+                        tok_payload = _json.loads(data_line[6:])
+                        stream_answer.append(tok_payload.get("text", ""))
+                    except Exception:
+                        pass
+                    yield chunk
+
+                elif chunk.startswith("event: done\n"):
+                    # Inject conv_id into the done payload and persist bot message
+                    try:
+                        data_line = [l for l in chunk.split("\n") if l.startswith("data: ")][0]
+                        done_payload = _json.loads(data_line[6:])
+                    except Exception:
+                        done_payload = {}
+
+                    if optional_user and conv_id is not None:
+                        full_answer = "".join(stream_answer)
+                        bot_meta = {
+                            "sql":            done_payload.get("sql"),
+                            "tables":         done_payload.get("tables_queried"),
+                            "inference_time": done_payload.get("inference_time"),
+                            "cache_hit":      done_payload.get("cache_hit"),
+                        }
+                        try:
+                            await _asyncio.to_thread(save_message, conv_id, "bot", full_answer, bot_meta)
+                            await _asyncio.to_thread(touch_conversation, conv_id)
+                        except Exception:
+                            pass
+
+                    done_payload["conv_id"] = conv_id
+                    yield f"event: done\ndata: {_json.dumps(done_payload)}\n\n"
+
+                else:
+                    yield chunk
+
         except Exception as exc:
-            import json
-            yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+            yield f"event: error\ndata: {_json.dumps({'detail': str(exc)})}\n\n"
 
     return FastAPIStreamingResponse(
         event_generator(),
@@ -440,6 +596,49 @@ async def db_health():
              (SELECT COUNT(*) FROM financial_categories)    AS categories""",
     )
     return {"status": "ok", "database": "connected", **rows[0]}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/db/alerts
+# ---------------------------------------------------------------------------
+@router.get("/db/alerts")
+async def db_alerts():
+    """Return metrics significantly under budget (>10% below) for the most recent month."""
+    import asyncio
+    _SQL_ALERTS = """
+WITH fmd AS (
+  SELECT DISTINCT ON (financial_metric_id, date) *
+  FROM financial_metrics_data
+  ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+),
+latest_month AS (
+  SELECT MAX(date) AS max_date FROM fmd WHERE real_value IS NOT NULL
+)
+SELECT
+  fc.name  AS category,
+  fm.name  AS metric,
+  TO_CHAR(fmd.date, 'YYYY-MM') AS period,
+  ROUND(fmd.real_value::numeric, 0)      AS actual,
+  ROUND(fmd.budget_value::numeric, 0)    AS budget,
+  ROUND(fmd.last_year_real_value::numeric, 0) AS prior_year,
+  ROUND((fmd.real_value - fmd.budget_value) * 100.0 /
+        NULLIF(ABS(fmd.budget_value), 0), 1)            AS vs_budget_pct,
+  ROUND((fmd.real_value - fmd.last_year_real_value) * 100.0 /
+        NULLIF(ABS(fmd.last_year_real_value), 0), 1)    AS yoy_pct
+FROM fmd
+JOIN latest_month lm ON fmd.date = lm.max_date
+JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
+JOIN financial_types ft   ON ft.id = fm.financial_type_id
+JOIN financial_categories fc ON fc.id = ft.financial_category_id
+WHERE fmd.real_value IS NOT NULL AND fmd.budget_value IS NOT NULL
+  AND fc.name IN ('CA Mobile','Data Mobile','Mobile Money','P&L conso','Opex Consolidés')
+  AND (fmd.real_value - fmd.budget_value) * 100.0 /
+      NULLIF(ABS(fmd.budget_value), 0) < -10
+ORDER BY vs_budget_pct ASC
+LIMIT 25
+"""
+    rows, _ = await asyncio.to_thread(db_execute, _SQL_ALERTS)
+    return {"alerts": rows, "period": rows[0]["period"] if rows else None}
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +733,61 @@ async def db_schema():
 
 
 # ---------------------------------------------------------------------------
+# GET /api/v1/db/monthly-report
+# ---------------------------------------------------------------------------
+@router.get("/db/monthly-report")
+async def db_monthly_report(language: str = "fr", model: str = ""):
+    """
+    Generate an automated monthly management narrative.
+    Fetches the latest month's KPIs, CAPEX, cashflow, and commissions,
+    assigns red/yellow/green signals, then calls the LLM to write a
+    structured board-level report.
+
+    Query params:
+      language  fr | en  (default: fr)
+      model     override model name (default: settings.OLLAMA_MODEL)
+    """
+    import asyncio
+    from app.agents.monthly_report import generate_monthly_report
+
+    model_arg = model.strip() or None
+    try:
+        result = await asyncio.to_thread(generate_monthly_report, language, model_arg)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Monthly report generation failed: {exc}",
+        ) from exc
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/db/geo-intelligence
+# ---------------------------------------------------------------------------
+@router.get("/db/geo-intelligence")
+async def db_geo_intelligence(year: int | None = None, month: int | None = None):
+    """
+    Return geographic revenue intelligence — MoMo reactivation and
+    data/voice auto-recharge aggregated by department/commune.
+
+    Query params:
+      year   e.g. 2025 (default: latest period in financial_metrics_data)
+      month  1–12     (default: latest period's month)
+    """
+    import asyncio
+    from app.agents.geo_intelligence import get_geo_intelligence
+
+    try:
+        result = await asyncio.to_thread(get_geo_intelligence, year, month)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Geo intelligence query failed: {exc}",
+        ) from exc
+    return result
+
+
+# ---------------------------------------------------------------------------
 # GET /api/v1/db/schema/text
 # ---------------------------------------------------------------------------
 @router.get("/db/schema/text")
@@ -547,3 +801,22 @@ async def db_schema_text():
 
     text = await asyncio.to_thread(build_schema_context)
     return PlainTextResponse(content=text)
+
+
+# ---------------------------------------------------------------------------
+# GET  /api/v1/cache/stats   — semantic cache statistics
+# POST /api/v1/cache/clear   — flush the semantic cache
+# ---------------------------------------------------------------------------
+@router.get("/cache/stats")
+async def cache_stats():
+    """Return semantic cache statistics (hit rate, entry count, TTL)."""
+    from app.agents.semantic_cache import semantic_cache
+    return semantic_cache.stats()
+
+
+@router.post("/cache/clear", status_code=status.HTTP_200_OK)
+async def cache_clear():
+    """Flush all semantic cache entries."""
+    from app.agents.semantic_cache import semantic_cache
+    n = semantic_cache.clear()
+    return {"cleared": n, "message": f"Semantic cache cleared ({n} entries removed)"}

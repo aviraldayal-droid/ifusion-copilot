@@ -2,20 +2,43 @@ import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Compute .env search paths at module level so Docker shallow paths work.
+# Local: /home/.../tbg_copilot/tb/app/config/settings.py → parents 2,3,4 all valid.
+# Docker: /app/app/config/settings.py → only parents 0-3 exist; skip parent[4].
+_file_parents = list(Path(__file__).resolve().parents)
+_ENV_FILES = [
+    str(_file_parents[i] / ".env")
+    for i in [4, 3, 2]
+    if i < len(_file_parents) and (_file_parents[i] / ".env").exists()
+]
+
 
 class Settings(BaseSettings):
+    DB_USER: str = "digiwise_rw"
+    DB_PASSWORD: str = ""
+    DB_HOST: str = "197.230.47.51"
+    DB_PORT: str = "5432"
+    DB_NAME: str = "digiwise"
     # Ollama — supports both local and cloud
     # OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_BASE_URL: str = "https://api.ollama.com"
-    OLLAMA_MODEL: str = "llama3"
+    OLLAMA_MODEL: str = "nemotron-3-nano:30b"
     OLLAMA_API_KEY: str = ""  # Set for Ollama Cloud, leave empty for local
-    
+
+    # Narration model for format_answer — defaults to OLLAMA_MODEL if empty.
+    # Use a fluent language model here (e.g. mistral-large-3, qwen3-next:80b).
+    OLLAMA_NARRATION_MODEL: str = "ministral-3:14b"
+
     # Embedding model for schema RAG — defaults to OLLAMA_MODEL if empty.
     # Pull a dedicated model for better quality: ollama pull nomic-embed-text
     OLLAMA_EMBEDDING_MODEL: str = ""
 
+    @property
+    def DATABASE_URL(self) -> str:
+        from urllib.parse import quote_plus
+        return f"postgresql://{self.DB_USER}:{quote_plus(self.DB_PASSWORD)}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
     # PostgreSQL
-    DATABASE_URL: str = "postgresql://digiwise:digiwise_secret@localhost:5432/digiwise"
+    # DATABASE_URL: str = "postgresql://digiwise:digiwise_secret@localhost:5432/digiwise"
 
     # LangSmith
     LANGSMITH_API_KEY: str = ""
@@ -27,11 +50,8 @@ class Settings(BaseSettings):
     APP_TITLE: str = "TBG AI Copilot"
     APP_VERSION: str = "1.0.0"
 
-    # Prefer the repo-root .env if present, otherwise fall back to tb/.env.
-    _ROOT_ENV_FILE = Path(__file__).resolve().parents[4] / ".env"
-    _LOCAL_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
     model_config = SettingsConfigDict(
-        env_file=_ROOT_ENV_FILE if _ROOT_ENV_FILE.exists() else _LOCAL_ENV_FILE,
+        env_file=_ENV_FILES,
         extra="ignore",
     )
 

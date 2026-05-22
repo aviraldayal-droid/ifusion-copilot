@@ -1,0 +1,42 @@
+# Git
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment — provide at runtime via env_file or -e flags
+.env
+
+# Development / eval tooling
+eval_*.csv
+eval_*.jsonl
+eval_report*.md
+eval_category_analysis.md
+benchmark_questions.txt
+check_pipeline.py
+eval_scorecard.py
+test_cache.py
+generate_schema_doc.py
+today_tasks.txt
+oc.py
+schema_doc.md
+
+# Large binary / media files
+videos/
+screenshots/
+reference_docs/
+schema_files/
+*.xlsx
+*.pdf
+*.docx
+*.mp4
+
+# Misc
+.claude/
+=5.18.0
+.~lock.*

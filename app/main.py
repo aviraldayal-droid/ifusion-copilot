@@ -13,6 +13,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
+from app.api.auth_routes import router as auth_router
+from app.api.conv_routes import router as conv_router
+from app.api.excel_routes import router as excel_router
 from app.config.settings import settings
 
 _STATIC = Path(__file__).parent / "static"
@@ -50,6 +53,9 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(auth_router)
+app.include_router(conv_router)
+app.include_router(excel_router)
 
 # Serve the chat UI at /
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")

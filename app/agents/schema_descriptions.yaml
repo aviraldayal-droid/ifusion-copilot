@@ -105,9 +105,15 @@ cashflow_subcategories:
 capex_data:
   description: >
     Monthly CAPEX spend by project: equipment costs, services costs, and
-    additional costs per month/year. Join to capex_projects for project metadata.
-    Use for capital expenditure analysis, CAPEX vs budget, spend by project.
-  aliases: CAPEX, investissement, equipement, services, depenses capital, immobilisations
+    additional_costs per month/year. Columns: id, capex_projects_id, month (int 1-12),
+    year (int), equipment (FCFA), services (FCFA), additional_costs (FCFA).
+    Use for capital expenditure analysis, CAPEX vs budget, spend by project,
+    spend per direction, additional costs per direction, total additional_costs.
+    Join to capex_projects for supplier_name and direction_name.
+  aliases: >
+    CAPEX, investissement, equipement, services, additional costs, additional_costs,
+    depenses capital, immobilisations, cout supplementaire, frais additionnels,
+    capex par direction, spend per direction, total additional costs par direction
 
 capex_projects:
   description: >
@@ -243,10 +249,15 @@ collapsible_items:
 
 moov_money_data:
   description: >
-    Transaction-level Moov Money (mobile money) data: MSISDN, transaction type,
-    amount, date, and validation flags (unique transaction, 7-day follow-up).
-    Use for MoMo transaction volume, amount analysis, subscriber activity.
-  aliases: MoMo, Moov Money, mobile money, transactions MoMo, paiement mobile, transfert argent
+    Transaction-level Moov Money (mobile money) data — one row per transaction.
+    Columns: transaction_date (timestamp), msisdn, transaction_type, amount (bigint).
+    Use this table for MoMo transaction count, total transaction volume/amount,
+    monthly transaction trends, unique subscriber activity. Filter by year using
+    EXTRACT(YEAR FROM transaction_date). Do NOT use financial_metrics_data for this.
+  aliases: >
+    MoMo, Moov Money, mobile money, transaction volume, transaction count,
+    nombre de transactions, volume MoMo, montant transactions, activite MoMo,
+    transactions par mois, paiement mobile, transfert argent, mobile money data
 
 moov_money_reactivation_data:
   description: >
@@ -384,8 +395,23 @@ roaming_prefix:
 
 revenue_raw_data:
   description: >
-    Raw revenue records before aggregation — source-level revenue entries.
-  aliases: donnees brutes revenu, revenue brut, revenu source
+    Daily revenue by segment for Moov Benin — one row per calendar day. Columns:
+    date (DATE), ca_global (total daily revenue), ca_voix_classique (voice revenue),
+    ca_forfaits_voix (voice forfait revenue), ca_pass_bonus, ca_data (data revenue),
+    moov_sayaa, autres, rechargement (recharge amount), ratio_conso_rechargement,
+    parc_abonnes_global, gross_add, churn, net_add, trafic_voix, trafic_data_ko.
+    Use this table for revenue breakdown by segment (Voix, Data, Forfaits), monthly
+    revenue aggregation (GROUP BY DATE_TRUNC), year-over-year revenue comparison
+    (self-join on month with different years), rechargement ratio, and subscriber
+    KPIs per day. To get monthly totals: SUM(ca_global) GROUP BY DATE_TRUNC('month', date).
+    Data available from 2020 through 2025.
+  aliases: >
+    CA Global journalier, CA Voix, CA Data, CA Forfaits, revenue by segment,
+    segment breakdown, daily revenue, revenus journaliers, chiffre d affaires journalier,
+    rechargement ratio, rechargement, voix classique, data revenue, forfaits voix,
+    monthly revenue, CA mensuel, revenue per month, revenue 2025, revenue 2024,
+    revenue comparison, YoY revenue, year-over-year revenue, segment share,
+    parc abonnes, gross add, net add, churn, trafic voix, trafic data
 
 revenue_metadata:
   description: >
@@ -526,8 +552,17 @@ base_lineage_mali:
 
 monthly_evolution:
   description: >
-    Month-over-month evolution/growth metrics — percentage changes per KPI.
-  aliases: evolution mensuelle, croissance mensuelle, variation mensuelle
+    Year-over-year evolution rates (growth percentages in decimal form) for revenue
+    segments of Moov Benin — one row per (month, current_year). Values like ca_global=-0.20
+    mean -20% YoY evolution. Columns: month (int 1–12), current_year (int), ca_global
+    (YoY evolution of total revenue), ca_voix_globale, ca_voix_classique, ca_forfaits_voix,
+    ca_data, ca_pass_bonus, autres_ca, rechargement. This table is SPARSE (only a few rows
+    exist). For actual revenue values and revenue breakdowns, use revenue_raw_data instead.
+    Only use monthly_evolution when the question explicitly asks for evolution rates or
+    percentage change, not for absolute revenue.
+  aliases: >
+    evolution mensuelle, taux evolution, taux de croissance, evolution CA,
+    monthly evolution rates, growth percentage, pourcentage evolution
 
 weekly_evolution:
   description: >

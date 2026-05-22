@@ -10,6 +10,7 @@ class UploadResponse(BaseModel):
     sheets_parsed: list[str]
     periods_available: list[str]
     message: str
+    alerts: list[dict] = []
 
 
 class CompareUploadResponse(BaseModel):
@@ -19,13 +20,15 @@ class CompareUploadResponse(BaseModel):
     sheets_parsed: list[str]
     periods_available: list[str]
     message: str
+    alerts: list[dict] = []
 
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
     conversation_id: str = Field(default="default")
     model: str | None = Field(default=None)
-    language: str = Field(default="en", pattern="^en$")
+    language: str = Field(default="en", pattern="^(en|fr)$")
+    conv_id: int | None = Field(default=None)
 
 
 class ChartSpec(BaseModel):
@@ -39,6 +42,9 @@ class ChartSpec(BaseModel):
     x_label: str = ""
     y_label: str = ""
     trend_analysis: str = ""
+    peak_idx: int | None = None
+    trough_idx: int | None = None
+    avg_value: float | None = None
 
 
 class Alert(BaseModel):
@@ -60,6 +66,11 @@ class ChatResponse(BaseModel):
     alerts: list[Alert] = []
     session_id: str
     inference_time: float | None = None
+    sql: str | None = None
+    tables_queried: list[str] = []
+    row_count: int | None = None
+    cache_hit: bool = False
+    conv_id: int | None = None
 
 
 class SessionInfo(BaseModel):

@@ -1,9 +1,76 @@
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.Python
+pip-wheel-metadata/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+# Never commit secrets. Copy .env.example → .env and fill in values locally.
 .env
+.env.local
+.env.*.local
+
+# ── IDE / editor ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── LibreOffice / Office lock files ──────────────────────────────────────────
+.~lock.*
+
+# ── Large binary / data files ─────────────────────────────────────────────────
 *.xlsx
+*.xls
 *.pdf
-*.sql
-.claude/
 *.docx
+*.mp4
+*.mov
+*.avi
+*.jpeg
+*.jpg
+# PNG excluded selectively — app/static/*.png are needed, bulk dirs are not
+screenshots/
+videos/
+reference_docs/
+schema_files/
+
+# ── Database dumps ────────────────────────────────────────────────────────────
+*.sql
+*.dump
+*.bak
+
+# ── Eval / benchmarking tooling ───────────────────────────────────────────────
+eval_*.csv
+eval_*.jsonl
+eval_report*.md
+eval_category_analysis.md
+eval_scorecard.py
+check_pipeline.py
+generate_schema_doc.py
+schema_doc.md
+test_cache.py
+today_tasks.txt
+benchmark_questions.txt
+
+# ── Misc junk ─────────────────────────────────────────────────────────────────
+=*
+oc.py
+
+# ── Claude Code internals ─────────────────────────────────────────────────────
+.claude/

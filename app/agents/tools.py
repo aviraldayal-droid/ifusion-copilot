@@ -53,6 +53,76 @@ def _severity(change_pct: float, warning: float, critical: float, higher_is_wors
         return "OK"
 
 
+def run_alerts_check(parsed_data: dict, thresholds: dict, period: str) -> list[dict]:
+    """
+    Scan all metrics against threshold rules for a given period.
+    Returns a list of alert dicts for CRITICAL and WARNING severities.
+    """
+    sheets = parsed_data.get("sheets", {})
+    threshold_rules = thresholds.get("rules", [])
+    alerts: list[dict] = []
+
+    for rule in threshold_rules:
+        sheet_key = rule["sheet"]
+        metric_code = rule["metric_code"]
+        comparison = rule["comparison"]
+        warning_pct = rule["warning_pct"]
+        critical_pct = rule["critical_pct"]
+        higher_is_worse = rule["direction"] == "higher_is_worse"
+
+        sheet = sheets.get(sheet_key)
+        if not sheet:
+            continue
+
+        metric = sheet["metrics"].get(metric_code)
+        if not metric:
+            continue
+
+        vals = metric["values"].get(period)
+        if not vals:
+            continue
+
+        reel = vals.get("reel")
+        budget = vals.get("budget")
+        n1 = vals.get("n1_reel")
+
+        if comparison == "yoy":
+            change_pct = compute_yoy_pct(reel, n1)
+            comp_val = n1
+            comp_label = "N-1"
+        else:
+            change_pct = compute_vs_budget_pct(reel, budget)
+            comp_val = budget
+            comp_label = "Budget"
+
+        if change_pct is None:
+            continue
+
+        sev = _severity(change_pct, warning_pct, critical_pct, higher_is_worse)
+        if sev == "OK":
+            continue
+
+        alerts.append({
+            "severity": sev,
+            "sheet": sheet_key,
+            "metric": metric["label"],
+            "period": period,
+            "actual": reel,
+            "comparison": comp_val,
+            "comparison_label": comp_label,
+            "change_pct": change_pct,
+            "warning_pct": warning_pct,
+            "critical_pct": critical_pct,
+            "message": (
+                f"[{sev}] {metric['label']} ({sheet_key}) | {period} | "
+                f"Réel: {_fmt(reel)} | {comp_label}: {_fmt(comp_val)} | "
+                f"Change: {_pct(change_pct)}"
+            ),
+        })
+
+    return alerts
+
+
 def build_tools(parsed_data: dict, thresholds: dict) -> list:
     """Return a list of LangChain tools bound to the session's parsed data."""
 

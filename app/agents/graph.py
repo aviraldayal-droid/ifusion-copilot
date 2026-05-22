@@ -28,7 +28,7 @@ from typing import Iterator, TypedDict
 
 import sqlglot
 import sqlglot.expressions as sexp
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolCall
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
@@ -80,8 +80,8 @@ class OllamaLLM:
         self.tools = tools
         return self
 
-    def invoke(self, messages):
-        """Convert LangChain or raw messages to Ollama format and get response."""
+    def _prepare_messages(self, messages) -> list[dict]:
+        """Convert LangChain or raw messages to Ollama format."""
         msgs = []
         for m in messages:
             if isinstance(m, SystemMessage):
@@ -98,20 +98,49 @@ class OllamaLLM:
                 content = m.content
             else:
                 raise ValueError(f"Unsupported message type: {type(m)}")
+            if content:
+                msgs.append({"role": role, "content": content})
+        return msgs
 
-            if not content:
-                continue
-            msgs.append({"role": role, "content": content})
-
+    def invoke(self, messages):
+        """Convert LangChain or raw messages to Ollama format and get response."""
+        msgs = self._prepare_messages(messages)
         try:
-            response = self.client.chat(
-                model=self.model,
-                messages=msgs,
-            )
-            content = response.get('message', {}).get('content', '')
-            if not content:
-                raise ValueError("Empty response from Ollama API")
-            return HumanMessage(content=content)
+            kwargs: dict = {"model": self.model, "messages": msgs}
+            if self.tools:
+                ollama_tools = []
+                for t in self.tools:
+                    try:
+                        schema = t.args_schema.schema()
+                    except Exception:
+                        schema = {}
+                    ollama_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description or "",
+                            "parameters": schema,
+                        },
+                    })
+                kwargs["tools"] = ollama_tools
+            response = self.client.chat(**kwargs)
+            content = response.get('message', {}).get('content', '') or ''
+            tool_calls_raw = response.get('message', {}).get('tool_calls') or []
+            lc_tc = []
+            for i, tc in enumerate(tool_calls_raw):
+                fn = tc.get("function", {})
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {}
+                lc_tc.append(ToolCall(
+                    name=fn.get("name", ""),
+                    args=args,
+                    id=f"call_{fn.get('name', '')}_{i}",
+                ))
+            return AIMessage(content=content, tool_calls=lc_tc) if lc_tc else AIMessage(content=content)
         except Exception as e:
             log.error("Ollama API call failed: %s", str(e))
             raise
@@ -119,26 +148,32 @@ class OllamaLLM:
     def __call__(self, messages, *args, **kwargs):
         return self.invoke(messages)
 
+    def stream(self, messages, **kwargs):
+        """LangChain-compatible sync streaming."""
+        msgs = self._prepare_messages(messages)
+        for chunk in self.client.chat(model=self.model, messages=msgs, stream=True):
+            token = chunk.get('message', {}).get('content', '')
+            if token:
+                yield AIMessageChunk(content=token)
+
+    def invoke_streaming(self, messages) -> AIMessage:
+        """Like invoke() but uses the streaming API so the read-timeout is per-token,
+        not per-full-response. Avoids timeouts with slow/large models (e.g. 123B)."""
+        msgs = self._prepare_messages(messages)
+        try:
+            content = ""
+            for chunk in self.client.chat(model=self.model, messages=msgs, stream=True):
+                token = chunk.get("message", {}).get("content", "")
+                if token:
+                    content += token
+            return AIMessage(content=content)
+        except Exception as e:
+            log.error("Ollama API call failed: %s", str(e))
+            raise
+
     def stream_tokens(self, messages) -> Iterator[str]:
         """Stream response tokens from Ollama."""
-        msgs = []
-        for m in messages:
-            if isinstance(m, SystemMessage):
-                role, content = "system", m.content
-            elif isinstance(m, HumanMessage):
-                role, content = "user", m.content
-            elif isinstance(m, str):
-                role, content = "user", m
-            elif isinstance(m, dict):
-                role = m.get("role", "user")
-                content = m.get("content") or m.get("text") or ""
-            elif hasattr(m, "content"):
-                role = getattr(m, "role", "user")
-                content = m.content
-            else:
-                continue
-            if content:
-                msgs.append({"role": role, "content": content})
+        msgs = self._prepare_messages(messages)
         try:
             for chunk in self.client.chat(model=self.model, messages=msgs, stream=True):
                 token = chunk.get('message', {}).get('content', '')
@@ -149,7 +184,7 @@ class OllamaLLM:
             raise
 
 
-_OLLAMA_TIMEOUT = 100  # seconds — stay under Cloudflare's 120 s proxy timeout
+_OLLAMA_TIMEOUT = 300  # seconds per-token read timeout (streaming resets this per chunk)
 
 
 def _make_llm(model: str | None = None) -> OllamaLLM:
@@ -193,6 +228,7 @@ Rules:
 - For monetary values: thousands separators, one decimal place, unit M CFA.
 - For percentages: always show the sign (+/-).
 - After answering, offer the next logical follow-up question.
+- After retrieving numeric data spanning multiple periods or entities, call generate_chart_spec to visualise it. Use 'line' for time-series, 'bar' for category rankings.
 """
 
 
@@ -221,6 +257,9 @@ class DbPipelineState(TypedDict):
     question:         str
     history:          str
     language:         str          # "en" or "fr" — controls answer language
+    # Snapshot routing
+    target_db:        str          # DB name to execute against; "" = main DB
+    snapshot_label:   str          # human-readable snapshot description for the answer
     # RAG output
     retrieved_schema: str          # compact schema for relevant tables only
     allowed_tables:   list[str]    # whitelist — blocks hallucinated table names
@@ -281,7 +320,24 @@ def _extract_sql(raw: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Node 0 — Retrieve schema (RAG)
+# Node 0 — Snapshot resolver (pure Python, no LLM, no DB)
+# ---------------------------------------------------------------------------
+
+def resolve_snapshot(state: DbPipelineState) -> dict:
+    """
+    Detect explicit snapshot requests and set target_db in state.
+    All normal questions pass through unchanged (target_db stays "").
+    """
+    from app.db.snapshots import resolve_snapshot as _resolve
+    snap = _resolve(state["question"])
+    if snap:
+        log.info("resolve_snapshot → %s (%s)", snap.dbname, snap.label)
+        return {"target_db": snap.dbname, "snapshot_label": snap.label}
+    return {"target_db": "", "snapshot_label": ""}
+
+
+# ---------------------------------------------------------------------------
+# Node 1 — Retrieve schema (RAG)
 # ---------------------------------------------------------------------------
 
 def retrieve_schema(state: DbPipelineState) -> dict:
@@ -327,12 +383,129 @@ You are a PostgreSQL 15 expert connected to a financial database for Moov Benin.
 ║  Any text outside the SQL = REJECTED       ║
 ╚═══════════════════════════════════════════╝
 
+LANGUAGE RULE:
+  The user question may be in French or English — this does NOT change your output.
+  You ALWAYS output SQL only. Never write a French or English sentence before or after the SQL.
+  SQL column aliases must be in English (e.g. AS total_revenue, AS month, AS variance_pct).
+  ✗ "Voici la requête SQL :" ← REJECTED
+  ✗ "Here is the query:"     ← REJECTED
+  ✓ SELECT ... FROM ...;     ← CORRECT
+
 COLUMN ALIAS RULE (mandatory):
   Every computed expression MUST have an AS alias so column headers are readable.
   ✓  SUM(jan + feb + mar) AS q1_total
   ✓  ROUND(real_value / budget_value * 100, 2) AS pct_budget
   ✓  prodium + linarcels + easycom AS total_commission
   ✗  SUM(jan + feb)          ← produces ugly "?column?" header — FORBIDDEN
+
+MONTH FORMATTING RULE (mandatory):
+  Whenever you SELECT a month integer column, convert it to a full month name.
+  ✓  to_char(to_date(cd.month::text, 'MM'), 'Month') AS month
+  ✓  to_char(to_date(EXTRACT(MONTH FROM d.date)::int::text, 'MM'), 'Month') AS month
+  This applies to any column named month, mois, month_number, month_no, etc.
+  ✗  SELECT cd.month …        ← returns "9" — FORBIDDEN
+  ✗  SELECT EXTRACT(MONTH …)  ← returns 9.0 — FORBIDDEN
+  Always ORDER BY the original integer expression, not the name alias.
+  ✓  ORDER BY cd.month        ← sorts correctly as 1,2,…12
+  ✓  ORDER BY EXTRACT(MONTH FROM d.date)
+
+⚠ DEDUPLICATION RULE — MANDATORY FOR financial_metrics_data:
+  The financial_metrics_data table contains DUPLICATE rows for 2025 and 2026 data
+  (multiple uploads created multiple version_id entries per metric per month).
+  The same (financial_metric_id, date) pair can have version_id=1 (original) AND version_id=2
+  (corrected later). Without dedup you return stale values alongside the current ones.
+
+  YOU MUST ALWAYS wrap financial_metrics_data in a deduplication CTE — for EVERY query,
+  including simple point lookups, not only aggregations.
+
+  ✓ CORRECT pattern (always use this as the base CTE):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT ... FROM fmd
+    JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
+    ...
+
+  ✗ WRONG — inflates all values by 2–3x (aggregations):
+    SELECT SUM(real_value) FROM financial_metrics_data WHERE ...
+
+  ✗ WRONG — returns stale version alongside latest (point lookup without dedup):
+    SELECT real_value FROM financial_metrics_data
+    JOIN financial_metric fm ON fm.id = financial_metric_id
+    WHERE fm.name = 'EBITDA' AND date = '2025-06-01';
+    -- if version_id=1 (890) and version_id=2 (912) both exist → returns 2 rows, one wrong
+
+  ✗ WRONG — using LIMIT 1 to "fix" the duplicate (silently drops valid rows):
+    SELECT real_value FROM financial_metrics_data WHERE ...
+    ORDER BY version_id DESC LIMIT 1;
+    -- FORBIDDEN: hides other metrics that legitimately match the same filter
+
+  ✓ CORRECT point lookup (dedup CTE, then filter):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT fm.name, fmd.real_value
+    FROM fmd
+    JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
+    WHERE fm.name ILIKE '%EBITDA%'
+      AND fmd.date = '2025-06-01';
+    -- dedup picks version_id=2 (912) per metric; returns one row per matching metric
+
+  LIMIT RULE: NEVER add LIMIT to handle versioning or to "get one result".
+    ✓ Use LIMIT only when the question explicitly asks for "top N", "highest N", or "most recent N".
+    ✗ LIMIT 1 as a shortcut for dedup is FORBIDDEN — it silently drops valid matching rows.
+
+  This rule applies to ALL years including 2024. Always use the dedup CTE.
+
+EBITDA METRIC NAME RULE:
+  Use fm.name = 'EBITDA' (exact match) for all EBITDA queries.
+  ✗ NEVER use ILIKE '%EBITDA%' — it also matches 'Neutralisation de la var. de provisions
+    incluses dans l\'Ebitda (-)' which is a sub-adjustment entry, not the main EBITDA.
+  ✓ Correct:  WHERE fm.name = 'EBITDA'
+  ✗ Wrong:    WHERE fm.name ILIKE '%EBITDA%'
+
+QUARTERLY / SINGLE-PERIOD QUERIES — for any question about a SPECIFIC named metric (EBITDA, ARPU, OPEX, etc.):
+  ⚠ MANDATORY: When querying a specific metric by name, ALWAYS include budget_value and last_year_real_value.
+    Omitting these columns forces the formatter to write "N/A" for budget and YoY — FORBIDDEN.
+    ✓ Always SELECT: actual_m_fcfa, budget_m_fcfa, prior_year_m_fcfa, variance
+    ✗ NEVER return only a single aggregate column (e.g. AS ebitda_q1_2025) — this strips budget/YoY context.
+
+  EXCEPTION — "list ALL metrics" queries (no specific metric named, e.g. "show all metrics in January"):
+    Select ONLY the columns the question asks for (typically name, real_value).
+    Do NOT add budget_value or last_year_real_value unless the question explicitly requests them.
+    ✓ SELECT fm.name, fmd.real_value FROM fmd ... WHERE date = '2025-01-01' ORDER BY fm.name
+    ✗ Adding budget_value here bloats output and breaks comparisons with expected schema.
+
+  QUARTER MONTH RANGES: Q1=1–3, Q2=4–6, Q3=7–9, Q4=10–12
+
+  ✓ EBITDA for a single quarter — monthly breakdown + quarterly total (use this for any quarter query):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT
+      to_char(fmd.date, 'Month YYYY')                          AS period,
+      ROUND(fmd.real_value::numeric, 0)                        AS actual_m_fcfa,
+      ROUND(fmd.budget_value::numeric, 0)                      AS budget_m_fcfa,
+      ROUND(fmd.last_year_real_value::numeric, 0)              AS prior_year_m_fcfa,
+      ROUND((fmd.real_value - fmd.budget_value)::numeric, 0)   AS variance,
+      CASE WHEN fmd.budget_value != 0
+           THEN ROUND(((fmd.real_value - fmd.budget_value) / fmd.budget_value * 100)::numeric, 1)
+           ELSE NULL END                                        AS variance_pct
+    FROM fmd
+    JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
+    WHERE fm.name = 'EBITDA'
+      AND EXTRACT(YEAR  FROM fmd.date) = 2025
+      AND EXTRACT(MONTH FROM fmd.date) BETWEEN 1 AND 3
+    ORDER BY fmd.date;
+
+  This pattern (per-row with period label, actual, budget, prior_year, variance) applies to ALL
+  single-quarter or single-month queries on financial_metrics_data — not just EBITDA.
 
 CRITICAL — TWO TABLE STRUCTURES EXIST:
 
@@ -387,10 +560,27 @@ POSTGRESQL RULES:
   ✓ NULLIF(col, 0) to prevent division by zero
   ✓ COALESCE(col, 0) for NULL handling
 
+ROUND CASTING RULE (mandatory):
+  PostgreSQL ROUND(expr, n) only works when expr is NUMERIC, not FLOAT/DOUBLE PRECISION.
+  Financial columns (real_value, budget_value, last_year_real_value, division results) are
+  double precision — you MUST cast to ::numeric before rounding with decimal places.
+  ✗ ROUND(real_value / budget_value * 100, 2)         ← FAILS: function does not exist
+  ✗ ROUND(AVG(real_value), 2)                         ← FAILS: function does not exist
+  ✓ ROUND((real_value / budget_value * 100)::numeric, 2)   ← CORRECT
+  ✓ ROUND(AVG(real_value)::numeric, 2)                     ← CORRECT
+  Rule: always write ROUND((expr)::numeric, n) — cast the whole expression, not the column.
+
 NULL HANDLING:
-  • Aggregations: Always add WHERE value IS NOT NULL to avoid NULL results
-  • Variance: Use NULLIF(ABS(budget), 0) to guard against division by zero
-  • Comparisons: Always check both real_value and budget_value are NOT NULL
+  • "List all" / "show every" / "for all metrics" queries: NEVER add WHERE real_value IS NOT NULL
+    or WHERE budget_value IS NOT NULL. These questions must return every row including NULL rows.
+    ✗ FORBIDDEN: WHERE real_value IS NOT NULL (drops rows the user asked to see)
+    ✓ CORRECT: no IS NOT NULL filter — let NULLs appear in the result
+  • Aggregations (SUM/AVG) on a SPECIFIC metric: Add WHERE value IS NOT NULL only when the
+    question asks for a specific named metric trend (not "all metrics").
+  • Division: Use NULLIF(denominator, 0) to guard against division by zero.
+  • Variance pct: Use CASE WHEN budget_value != 0 THEN ROUND((...) * 100)::numeric, 2) ELSE NULL END
+  • CAPEX aggregations only: COALESCE(cd.equipment,0) + COALESCE(cd.services,0) +
+    COALESCE(cd.additional_costs,0) — only for SUM of capex spend, not for COUNT queries.
 
 REVENUE / KPI HIERARCHY — use this for ANY question about revenue, ARPU, EBITDA, budgets, categories:
   financial_categories   ← top-level groupings (CA Mobile, Data Mobile, Mobile Money, Capex, etc.)
@@ -402,17 +592,75 @@ REVENUE / KPI HIERARCHY — use this for ANY question about revenue, ARPU, EBITD
                         'Capex Consolidés', 'Cash Conso', 'P&L conso', 'Opex Consolidés',
                         'Marge brute Mobile', 'Trafic mobile', 'Indicateurs Mobile'
 
-  ✓ Revenue by category 2024 (always join via financial_metric):
-    SELECT fc.name AS category, SUM(fmd.real_value) AS total
-    FROM financial_metrics_data fmd
+  ✓ Revenue by category (always use dedup CTE + join via financial_metric):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT fc.name AS category, ROUND(SUM(fmd.real_value)::numeric, 0) AS total
+    FROM fmd
     JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
-    WHERE EXTRACT(YEAR FROM fmd.date) = 2024 AND fmd.real_value IS NOT NULL
+    WHERE EXTRACT(YEAR FROM fmd.date) = 2025 AND fmd.real_value IS NOT NULL
     GROUP BY fc.name ORDER BY total DESC;
 
   ✗ NEVER use cashflow_data for revenue questions — cashflow_data stores treasury cash flow,
     NOT operational revenue. "Category" in a revenue question means financial_categories, not cashflow_categories.
+
+REVENUE BY SEGMENT — revenue_raw_data (DAILY DATA):
+  Use revenue_raw_data (NOT financial_metrics_data, NOT monthly_evolution) when the question
+  asks about: revenue breakdown by segment, CA Voix vs CA Data vs CA Forfaits, rechargement
+  ratio, YoY CA Global growth, segment share of total revenue, monthly revenue aggregation.
+
+  revenue_raw_data has one row per DAY. To get monthly totals, always GROUP BY DATE_TRUNC.
+  Columns: date (DATE), ca_global, ca_voix_classique, ca_forfaits_voix, ca_pass_bonus,
+           ca_data, moov_sayaa, autres, rechargement, parc_abonnes_global,
+           gross_add, churn, net_add, trafic_voix, trafic_data_ko.
+
+  IMPORTANT: monthly_evolution is SPARSE (only 1-2 rows) and stores YoY growth RATES
+  (decimal form like -0.20 = -20%), NOT absolute revenue. Do NOT use monthly_evolution
+  for revenue values or segment breakdowns.
+
+  ✓ Revenue breakdown by segment with share % for a quarter:
+    SELECT DATE_TRUNC('month', date) AS month,
+           SUM(ca_global) AS ca_global,
+           SUM(ca_voix_classique) AS ca_voix,
+           SUM(ca_data) AS ca_data,
+           SUM(ca_forfaits_voix) AS ca_forfaits,
+           ROUND((SUM(ca_voix_classique) / NULLIF(SUM(ca_global), 0) * 100)::numeric, 2) AS voix_share_pct,
+           ROUND((SUM(ca_data)           / NULLIF(SUM(ca_global), 0) * 100)::numeric, 2) AS data_share_pct,
+           ROUND((SUM(ca_forfaits_voix)  / NULLIF(SUM(ca_global), 0) * 100)::numeric, 2) AS forfaits_share_pct
+    FROM revenue_raw_data
+    WHERE EXTRACT(YEAR FROM date) = 2025 AND EXTRACT(MONTH FROM date) BETWEEN 1 AND 3
+    GROUP BY DATE_TRUNC('month', date)
+    ORDER BY month;
+
+  ✓ Year-over-year CA Global growth per month (2025 vs 2024):
+    WITH monthly AS (
+      SELECT EXTRACT(YEAR FROM date)::int AS yr, EXTRACT(MONTH FROM date)::int AS mo,
+             SUM(ca_global) AS ca_global
+      FROM revenue_raw_data GROUP BY yr, mo
+    )
+    SELECT m25.mo AS month,
+           m25.ca_global AS ca_2025,
+           m24.ca_global AS ca_2024,
+           ROUND(((m25.ca_global - m24.ca_global) / NULLIF(m24.ca_global, 0) * 100)::numeric, 2) AS yoy_growth_pct
+    FROM monthly m25
+    LEFT JOIN monthly m24 ON m24.yr = 2024 AND m24.mo = m25.mo
+    WHERE m25.yr = 2025 ORDER BY m25.mo;
+
+  ✓ Rechargement as % of CA Global per month:
+    SELECT EXTRACT(MONTH FROM date)::int AS month,
+           SUM(rechargement) AS rechargement,
+           SUM(ca_global) AS ca_global,
+           ROUND((SUM(rechargement) / NULLIF(SUM(ca_global), 0) * 100)::numeric, 2) AS rechargement_ratio_pct
+    FROM revenue_raw_data WHERE EXTRACT(YEAR FROM date) = 2025
+    GROUP BY EXTRACT(MONTH FROM date) ORDER BY month;
+
+  ✗ Do NOT use financial_metrics_data for segment breakdown — it does not have ca_voix/ca_data columns.
+  ✗ Do NOT use monthly_evolution for revenue values — it stores YoY evolution rates, not amounts.
 
 CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by month:
   capex_projects: id [PK], supplier_name, direction_name, project_title, contract_no
@@ -427,13 +675,55 @@ CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by mont
     GROUP BY cd.month
     ORDER BY cd.month;
 
+  CAPEX COALESCE RULE — applies only when computing total spend (SUM of cost columns):
+    equipment, services, additional_costs can be NULL. When summing them:
+    ✓ COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)
+    ✗ cd.equipment + cd.services + cd.additional_costs  ← NULL in any column = NULL total
+    Do NOT apply COALESCE for COUNT queries or when not aggregating spend.
+
+    Always qualify capex columns with the table alias cd. — never reference them bare.
+    ✗ SUM(additional_costs)        ← ambiguous, will error
+    ✓ SUM(cd.additional_costs)     ← correct
+
+  ✓ Total capex PER DIRECTION in a year (group by cp.direction_name):
+    SELECT cp.direction_name,
+           SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)) AS total_capex
+    FROM capex_data cd
+    JOIN capex_projects cp ON cp.id = cd.capex_projects_id
+    WHERE cd.year = 2025
+    GROUP BY cp.direction_name
+    ORDER BY total_capex DESC;
+
+  ✓ All projects ranked by total cost:
+    SELECT cp.project_title, cp.supplier_name, cp.direction_name,
+           SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)) AS total_cost
+    FROM capex_data cd
+    JOIN capex_projects cp ON cp.id = cd.capex_projects_id
+    WHERE cd.year = 2025
+    GROUP BY cp.project_title, cp.supplier_name, cp.direction_name
+    ORDER BY total_cost DESC;
+
+  ⚠ CAPEX PROJECT GROUPING RULE — CRITICAL:
+    When grouping by project, ALWAYS use (cp.project_title, cp.supplier_name, cp.direction_name).
+    ✗ NEVER include cp.id in GROUP BY — it splits the same project into multiple rows.
+    ✓ GROUP BY cp.project_title, cp.supplier_name, cp.direction_name
+    ✗ GROUP BY cp.id, cp.project_title, cp.supplier_name, cp.direction_name  ← extra rows, FORBIDDEN
+
+  ✓ Total additional_costs per direction (use SUM(cd.additional_costs) — no COALESCE needed here):
+    SELECT cp.direction_name,
+           SUM(cd.additional_costs) AS total_additional_costs
+    FROM capex_data cd
+    JOIN capex_projects cp ON cp.id = cd.capex_projects_id
+    WHERE cd.year = 2025
+    GROUP BY cp.direction_name
+    ORDER BY total_additional_costs DESC NULLS LAST;
+
   ✓ Suppliers for a specific month (requires JOIN to capex_projects):
     SELECT cp.supplier_name,
-           SUM(cd.equipment + cd.services + cd.additional_costs) AS total_spend
+           SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)) AS total_spend
     FROM capex_data cd
     JOIN capex_projects cp ON cp.id = cd.capex_projects_id
     WHERE cd.year = 2025 AND cd.month = 9
-      AND (cd.equipment + cd.services + cd.additional_costs) > 0
     GROUP BY cp.supplier_name
     ORDER BY total_spend DESC;
 
@@ -462,6 +752,46 @@ CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by mont
   ✗ NEVER mix supplier columns into a monthly trend query — if the question
     asks "monthly trend" or "per month", GROUP BY cd.month only, no JOIN needed.
   ✗ NEVER reference capex_projects columns without the JOIN above.
+
+  ✓ CAPEX intensity ratio (total CAPEX as % of total revenue) — cross-table via CTE:
+    WITH capex_total AS (
+      SELECT SUM(COALESCE(equipment,0) + COALESCE(services,0) + COALESCE(additional_costs,0)) AS total_capex
+      FROM capex_data WHERE year = 2025
+    ),
+    revenue_total AS (
+      SELECT SUM(ca_global) AS total_revenue
+      FROM revenue_raw_data WHERE EXTRACT(YEAR FROM date) = 2025
+    )
+    SELECT total_capex, total_revenue,
+           ROUND(((total_capex / NULLIF(total_revenue, 0)) * 100)::numeric, 2) AS capex_intensity_pct
+    FROM capex_total, revenue_total;
+
+  ✓ CAPEX YoY comparison per month (self-join on capex_data, LEFT JOIN for missing 2024 months):
+    SELECT cd25.month,
+           to_char(to_date(cd25.month::text, 'MM'), 'Month') AS month_name,
+           SUM(COALESCE(cd25.equipment,0) + COALESCE(cd25.services,0) + COALESCE(cd25.additional_costs,0)) AS capex_2025,
+           COALESCE(SUM(COALESCE(cd24.equipment,0) + COALESCE(cd24.services,0) + COALESCE(cd24.additional_costs,0)), 0) AS capex_2024,
+           ROUND((((SUM(COALESCE(cd25.equipment,0)+COALESCE(cd25.services,0)+COALESCE(cd25.additional_costs,0))
+                  - COALESCE(SUM(COALESCE(cd24.equipment,0)+COALESCE(cd24.services,0)+COALESCE(cd24.additional_costs,0)),0))
+                  / NULLIF(COALESCE(SUM(COALESCE(cd24.equipment,0)+COALESCE(cd24.services,0)+COALESCE(cd24.additional_costs,0)),0), 0)
+                 ) * 100)::numeric, 2) AS yoy_change_pct
+    FROM capex_data cd25
+    LEFT JOIN capex_data cd24 ON cd24.capex_projects_id = cd25.capex_projects_id
+      AND cd24.month = cd25.month AND cd24.year = 2024
+    WHERE cd25.year = 2025
+    GROUP BY cd25.month ORDER BY cd25.month;
+
+  ✓ CAPEX breakdown by type as percentage:
+    SELECT
+      SUM(cd.equipment)         AS equipment_spend,
+      SUM(cd.services)          AS services_spend,
+      SUM(cd.additional_costs)  AS additional_costs_spend,
+      ROUND(SUM(cd.equipment) * 100.0
+            / NULLIF(SUM(cd.equipment + cd.services + cd.additional_costs), 0)::numeric, 2) AS equipment_pct,
+      ROUND(SUM(cd.services)  * 100.0
+            / NULLIF(SUM(cd.equipment + cd.services + cd.additional_costs), 0)::numeric, 2) AS services_pct
+    FROM capex_data cd
+    WHERE cd.year = 2025;
 
 CASH FLOW HIERARCHY — use ONLY for questions about flux de trésorerie / treasury / liquidity:
   realised_cashflow → cashflow_sections → cashflow_categories → cashflow_subcategories
@@ -495,29 +825,39 @@ MARGINS / PROFITABILITY QUERIES:
     'EBITDA'              — EBITDA in FCFA                       (category='P&L conso',     type="Chiffre d'affaires")
     'EBITA'               — EBITA in FCFA                        (category='P&L conso',     type="Chiffre d'affaires")
 
-  ✓ Compare available margin % metrics across segments (use fm.financial_type_id, NOT fmd):
+  ✓ Compare available margin % metrics across segments:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
     SELECT fc.name AS segment, fm.name AS margin_type,
            ROUND(AVG(fmd.real_value)::numeric, 2) AS avg_margin_pct
-    FROM financial_metrics_data fmd
+    FROM fmd
     JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
     WHERE fm.name IN ('% CA', '% Marge Brute/CA')
-      AND EXTRACT(YEAR FROM fmd.date) = 2024
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
       AND fmd.real_value IS NOT NULL
     GROUP BY fc.name, fm.name
     ORDER BY avg_margin_pct DESC;
 
   ✓ P&L summary (revenue, gross margin, EBITDA, net result) for a year:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
     SELECT fm.name AS kpi,
            ROUND(SUM(fmd.real_value)::numeric, 0) AS total_fcfa
-    FROM financial_metrics_data fmd
+    FROM fmd
     JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
     WHERE fc.name = 'P&L conso'
       AND fm.name IN ('Mobile', 'Marge Brute', 'EBITDA', 'RESULTAT NET')
-      AND EXTRACT(YEAR FROM fmd.date) = 2024
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
       AND fmd.real_value IS NOT NULL
     GROUP BY fm.name
     ORDER BY total_fcfa DESC;
@@ -525,14 +865,164 @@ MARGINS / PROFITABILITY QUERIES:
   ✗ Do NOT invent a "margin" column — it does not exist. Always JOIN to financial_metric.name.
   ✗ Do NOT use fc.name = 'Marge brute Mobile' for margin % — that category stores costs, not %.
 
+  ⚠ UNIT WARNING: financial_metrics_data stores values in MILLIONS of FCFA.
+    revenue_raw_data stores values in actual FCFA (raw amounts).
+    When joining these tables for ratio calculations, convert revenue_raw_data to millions:
+    SUM(ca_global) / 1000000.0 AS ca_global_millions
+    COLUMN ALIAS UNIT HINT: When selecting financial_metrics_data monetary columns, suffix
+    aliases with _m_fcfa so the formatter can display the correct unit:
+    ✓ ROUND(SUM(fmd.real_value)::numeric, 0) AS actual_m_fcfa
+    ✓ ROUND(SUM(fmd.real_value)::numeric, 0) AS total_opex_m_fcfa
+    This applies to all real_value, budget_value, last_year_real_value aggregations.
+
+  ✓ EBITDA margin % (EBITDA / CA Global) — join financial_metrics_data with revenue_raw_data:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    ),
+    monthly_ca AS (
+      SELECT DATE_TRUNC('month', date) AS month,
+             SUM(ca_global) / 1000000.0 AS ca_global_millions
+      FROM revenue_raw_data GROUP BY DATE_TRUNC('month', date)
+    )
+    SELECT
+      to_char(e.date, 'Month YYYY')  AS period,
+      ROUND(e.real_value::numeric, 2)                                                AS ebitda_millions,
+      ROUND(mc.ca_global_millions::numeric, 2)                                       AS ca_global_millions,
+      ROUND((e.real_value / NULLIF(mc.ca_global_millions, 0) * 100)::numeric, 2)    AS ebitda_margin_pct
+    FROM fmd e
+    JOIN financial_metric fm ON fm.id = e.financial_metric_id
+    JOIN monthly_ca mc ON DATE_TRUNC('month', e.date) = mc.month
+    WHERE fm.name = 'EBITDA'
+      AND EXTRACT(YEAR FROM e.date) = 2025
+    ORDER BY e.date;
+
+  JOIN KEY: financial_metrics_data → revenue_raw_data (for CA Global):
+    DATE_TRUNC('month', fmd.date) = DATE_TRUNC('month', rrd.date) — aggregate rrd by month first.
+    ALWAYS divide SUM(revenue_raw_data.ca_global) by 1,000,000 to convert to millions before dividing.
+  Use this join whenever computing a ratio of a financial_metrics_data metric against CA Global.
+
+CHURN RATE QUERIES — for questions about churn, taux de churn, attrition, résiliation:
+  ⚠ There is NO metric called 'churn' or 'taux de churn' directly in financial_metric.
+  Churn must be COMPUTED from prepaid subscriber counts in category 'Parc Mobile':
+    fm.name = 'Parc prépayé actif début Période'  ← subscribers at start of month
+    fm.name = 'Parc prépayé actif fin de période'  ← subscribers at end of month
+  Monthly churn rate = (début - fin) / début * 100
+
+  ✓ Monthly churn rate 2025 vs prior year (YoY):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    ),
+    debut AS (
+      SELECT fmd.date,
+             fmd.real_value          AS debut_2025,
+             fmd.last_year_real_value AS debut_2024
+      FROM fmd
+      JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
+      WHERE fm.name = 'Parc prépayé actif début Période'
+        AND EXTRACT(YEAR FROM fmd.date) = 2025
+        AND fmd.real_value IS NOT NULL
+    ),
+    fin AS (
+      SELECT fmd.date,
+             fmd.real_value          AS fin_2025,
+             fmd.last_year_real_value AS fin_2024
+      FROM fmd
+      JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
+      WHERE fm.name = 'Parc prépayé actif fin de période'
+        AND EXTRACT(YEAR FROM fmd.date) = 2025
+        AND fmd.real_value IS NOT NULL
+    )
+    SELECT EXTRACT(MONTH FROM d.date)::int AS month,
+           ROUND(((d.debut_2025 - f.fin_2025) * 100.0 / NULLIF(d.debut_2025, 0))::numeric, 2) AS churn_pct_2025,
+           ROUND(((d.debut_2024 - f.fin_2024) * 100.0 / NULLIF(d.debut_2024, 0))::numeric, 2) AS churn_pct_2024
+    FROM debut d
+    JOIN fin f ON f.date = d.date
+    ORDER BY month;
+
+  ✗ Do NOT search for metric names like 'churn', 'taux de churn', 'attrition' — they don't exist.
+  ✗ Do NOT query financial_metric with ILIKE '%churn%' — returns nothing.
+
+ROAMING REVENUE QUERIES — for questions about roaming, itinérance, roaming in/out:
+  ⚠ IMPORTANT: The DB does NOT have metrics called 'Roaming', 'Revenu Roaming', or 'Sortant voix roaming'.
+  The ONLY roaming metrics in financial_metric are:
+    fm.name = 'Dont Roaming National'  → roaming-IN revenue  (category='CA Mobile', type='Roaming in')
+    fm.name = 'Roaming out'            → roaming-OUT costs   (category='Marge brute Mobile') — stored as negative values
+
+  ✓ Monthly roaming-in revenue trend for 2025 with YoY comparison:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT EXTRACT(MONTH FROM fmd.date)::int AS month,
+           ROUND(SUM(fmd.real_value)::numeric, 2)            AS roaming_in_revenue,
+           ROUND(SUM(fmd.last_year_real_value)::numeric, 2)  AS prior_year,
+           ROUND(SUM(fmd.budget_value)::numeric, 2)          AS budget
+    FROM fmd
+    JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
+    WHERE fm.name = 'Dont Roaming National'
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
+      AND fmd.real_value IS NOT NULL
+    GROUP BY EXTRACT(MONTH FROM fmd.date)
+    ORDER BY month;
+
+  ✓ Roaming-out cost trend (costs are negative — show as positive for readability):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT EXTRACT(MONTH FROM fmd.date)::int AS month,
+           ROUND(ABS(SUM(fmd.real_value))::numeric, 2) AS roaming_out_cost
+    FROM fmd
+    JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
+    WHERE fm.name = 'Roaming out'
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
+      AND fmd.real_value IS NOT NULL
+    GROUP BY EXTRACT(MONTH FROM fmd.date)
+    ORDER BY month;
+
+  ✗ NEVER search for: 'Roaming', 'Revenu Roaming', 'roaming revenue', 'Sortant voix roaming' — these names do not exist.
+
+MOOV MONEY TRANSACTION QUERIES — for questions about MoMo transaction volume, count, amount, activity:
+  Use moov_money_data directly — NOT financial_metrics_data.
+  Columns: transaction_date (timestamp), msisdn, transaction_type, amount (bigint), amount_status,
+           unique_trans_status, within_7_days_status.
+
+  ✓ Total transaction volume (sum of amounts) in 2025:
+    SELECT SUM(amount) AS total_volume
+    FROM moov_money_data
+    WHERE EXTRACT(YEAR FROM transaction_date) = 2025;
+
+  ✓ Monthly transaction count in 2025:
+    SELECT EXTRACT(MONTH FROM transaction_date)::int AS month,
+           COUNT(*) AS transaction_count,
+           SUM(amount) AS total_amount
+    FROM moov_money_data
+    WHERE EXTRACT(YEAR FROM transaction_date) = 2025
+    GROUP BY EXTRACT(MONTH FROM transaction_date)
+    ORDER BY month;
+
+  ✗ Do NOT use financial_metrics_data for MoMo transaction counts or amounts.
+  ✗ The date column is transaction_date (timestamp) — NOT date, NOT created_at.
+
 SUBSCRIBER & TRAFFIC METRICS — for questions about subscribers, churn, ARPU, MoU, traffic, parc:
   Categories: 'Parc Mobile', 'Trafic mobile', 'Indicateurs Mobile', 'CA Mobile', 'Data Mobile'
   All stored in financial_metrics_data — same JOIN path as revenue queries.
 
   ✓ Monthly subscriber base trend:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
     SELECT EXTRACT(MONTH FROM fmd.date)::int AS month,
-           SUM(fmd.real_value) AS total_subscribers
-    FROM financial_metrics_data fmd
+           ROUND(SUM(fmd.real_value)::numeric, 0) AS total_subscribers
+    FROM fmd
     JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
     JOIN financial_types ft   ON ft.id = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
@@ -543,9 +1033,14 @@ SUBSCRIBER & TRAFFIC METRICS — for questions about subscribers, churn, ARPU, M
     ORDER BY month;
 
   ✓ ARPU monthly trend (fuzzy match on metric name):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
     SELECT EXTRACT(MONTH FROM fmd.date)::int AS month,
            ROUND(AVG(fmd.real_value)::numeric, 2) AS avg_arpu
-    FROM financial_metrics_data fmd
+    FROM fmd
     JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
     WHERE UPPER(fm.name) LIKE '%ARPU%'
       AND EXTRACT(YEAR FROM fmd.date) = 2025
@@ -560,17 +1055,71 @@ SUBSCRIBER & TRAFFIC METRICS — for questions about subscribers, churn, ARPU, M
     WHERE fc.name = 'Indicateurs Mobile'
     ORDER BY ft.name, fm.name;
 
+PRODUCT / SERVICE NAME LOOKUP — for questions about a specific named product, service, or line item
+  (e.g. "Clé Internet Mobile", "Data Bundle", "Forfait Voix", "3G", "4G", "Prépayé"):
+
+  ⚠ NEVER assume the metric name is spelled exactly as in the user's question.
+  ⚠ NEVER query capex_projects for sales, revenue, or product performance data.
+  ALL product/service revenue metrics are stored in financial_metrics_data + financial_metric.
+
+  STRATEGY — always use ILIKE with a broad pattern so spelling variants are matched:
+    fm.name ILIKE '%Clé Internet%'      -- matches "Clé Internet Mobile", "Clé Internet" etc.
+    fm.name ILIKE '%3G%'               -- matches any 3G metric
+    fm.name ILIKE '%Forfait%'          -- matches any forfait/bundle metric
+
+  ✓ Sales/revenue trend for a named product (e.g. "Clé Internet Mobile") in 2025 with YoY:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT EXTRACT(MONTH FROM fmd.date)::int AS month,
+           fm.name                                                    AS metric_name,
+           ROUND(SUM(fmd.real_value)::numeric, 0)                    AS actual_2025,
+           ROUND(SUM(fmd.last_year_real_value)::numeric, 0)          AS prior_2024,
+           ROUND((SUM(fmd.real_value) - SUM(fmd.last_year_real_value)) * 100.0
+                 / NULLIF(ABS(SUM(fmd.last_year_real_value)), 0), 1) AS yoy_pct
+    FROM fmd
+    JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
+    WHERE fm.name ILIKE '%Clé Internet%'
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
+      AND fmd.real_value IS NOT NULL
+    GROUP BY EXTRACT(MONTH FROM fmd.date), fm.name
+    ORDER BY month;
+
+  ✓ If unsure of the exact metric name, first explore what names exist:
+    SELECT DISTINCT fm.name, ft.name AS type, fc.name AS category
+    FROM financial_metric fm
+    JOIN financial_types ft ON ft.id = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fm.name ILIKE '%Internet%' OR fm.name ILIKE '%Clé%' OR fm.name ILIKE '%Dongle%'
+    ORDER BY fc.name, fm.name;
+
+  ✗ NEVER query capex_projects for sales or revenue data — it has no sales columns.
+  ✗ NEVER use fm.name = 'exact name' without ILIKE — the spelling in the DB may differ.
+
 BUDGET vs ACTUAL VARIANCE — for questions about budget, forecast, écart, vs target, over/under:
-  Use: real_value (actual), budget_value (plan/budget). Guard division with NULLIF(budget_value, 0).
+  Use: real_value (actual), budget_value (plan/budget).
+  variance_pct formula — use CASE WHEN to handle zero budget cleanly:
+    CASE WHEN budget_value != 0
+         THEN ROUND((((real_value - budget_value) / budget_value) * 100)::numeric, 2)
+         ELSE NULL
+    END AS variance_pct
+  ✗ Do NOT use ABS(budget_value) in the denominator for simple variance — it changes the sign direction.
 
   ✓ Variance by metric for a year (over/under budget):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
     SELECT fm.name AS metric,
            ROUND(SUM(fmd.real_value)::numeric, 0)      AS actual,
            ROUND(SUM(fmd.budget_value)::numeric, 0)    AS budget,
            ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance,
            ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value)) * 100.0
                  / NULLIF(ABS(SUM(fmd.budget_value)), 0), 2)               AS variance_pct
-    FROM financial_metrics_data fmd
+    FROM fmd
     JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
@@ -580,26 +1129,125 @@ BUDGET vs ACTUAL VARIANCE — for questions about budget, forecast, écart, vs t
     GROUP BY fm.name ORDER BY variance_pct DESC;
 
   ✓ Monthly actual vs budget for a single metric:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
     SELECT EXTRACT(MONTH FROM fmd.date)::int AS month,
            ROUND(SUM(fmd.real_value)::numeric, 0)   AS actual,
            ROUND(SUM(fmd.budget_value)::numeric, 0) AS budget
-    FROM financial_metrics_data fmd
+    FROM fmd
     JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
     WHERE fm.name = 'EBITDA'
       AND EXTRACT(YEAR FROM fmd.date) = 2025
       AND fmd.real_value IS NOT NULL AND fmd.budget_value IS NOT NULL
     GROUP BY EXTRACT(MONTH FROM fmd.date) ORDER BY month;
 
+QUARTERLY VARIANCE ANALYSIS — for questions about budget overrun, underperformance, écart budgétaire,
+  "which metrics exceeded/missed budget", "largest overruns", "budget tracking", "vs budget":
+
+  ⚠ ALWAYS include quarterly breakdown alongside the annual total.
+  This is MANDATORY — it reveals whether performance is improving or worsening across the year.
+  Columns q1_variance … q4_variance are absolute FCFA variances (positive = overrun, negative = miss).
+
+  ✓ Top budget overrunners with quarterly breakdown:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT
+      fc.name AS category,
+      fm.name AS metric,
+      ROUND(SUM(fmd.real_value)::numeric, 0)                                AS annual_actual,
+      ROUND(SUM(fmd.budget_value)::numeric, 0)                              AS annual_budget,
+      ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0)     AS total_variance,
+      ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value)) * 100.0
+            / NULLIF(ABS(SUM(fmd.budget_value)), 0), 1)                     AS variance_pct,
+      ROUND(SUM(CASE WHEN EXTRACT(MONTH FROM fmd.date) BETWEEN 1  AND 3
+                     THEN fmd.real_value - fmd.budget_value END)::numeric, 0) AS q1_variance,
+      ROUND(SUM(CASE WHEN EXTRACT(MONTH FROM fmd.date) BETWEEN 4  AND 6
+                     THEN fmd.real_value - fmd.budget_value END)::numeric, 0) AS q2_variance,
+      ROUND(SUM(CASE WHEN EXTRACT(MONTH FROM fmd.date) BETWEEN 7  AND 9
+                     THEN fmd.real_value - fmd.budget_value END)::numeric, 0) AS q3_variance,
+      ROUND(SUM(CASE WHEN EXTRACT(MONTH FROM fmd.date) BETWEEN 10 AND 12
+                     THEN fmd.real_value - fmd.budget_value END)::numeric, 0) AS q4_variance
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE EXTRACT(YEAR FROM fmd.date) = 2025
+      AND fmd.real_value IS NOT NULL AND fmd.budget_value IS NOT NULL
+    GROUP BY fc.name, fm.name
+    HAVING ABS(SUM(fmd.real_value) - SUM(fmd.budget_value)) > 0
+    ORDER BY ABS(SUM(fmd.real_value) - SUM(fmd.budget_value)) DESC
+    LIMIT 15;
+
+  ✓ For underperformers only (missed budget), change HAVING to:
+      HAVING SUM(fmd.real_value) < SUM(fmd.budget_value)
+    and ORDER BY total_variance ASC
+
+  ✓ For overrunners only (exceeded budget), change HAVING to:
+      HAVING SUM(fmd.real_value) > SUM(fmd.budget_value)
+    and ORDER BY total_variance DESC
+
+  ✗ NEVER return just an annual total for variance/overrun questions — always include q1…q4 columns.
+  ✗ NEVER omit q1_variance … q4_variance — the format layer uses them for trend analysis.
+
+UNDERPERFORMING REVENUE LINES — for questions like "which lines are underperforming vs last year",
+  "quelles lignes sous-performent", "revenue below last year", "en baisse par rapport à N-1":
+  Use HAVING SUM(real_value) < SUM(last_year_real_value) to filter only declining lines.
+
+  ⚠ MANDATORY: You MUST include ALL FOUR categories in the WHERE clause:
+    'CA Mobile', 'Data Mobile', 'Mobile Money', 'P&L conso'
+  ✗ NEVER remove 'P&L conso' — it contains EBITA and EBITDA which are known underperformers.
+  ✗ NEVER use LIMIT smaller than 20 — there are typically 10–15 underperforming lines.
+
+  Expected results include metrics such as:
+    EBITA (P&L conso), EBITDA (P&L conso), Prépayé (CA Mobile),
+    Achat de forfaits (CA Mobile), 3G (Data Mobile), 4G (Data Mobile),
+    Recharge Mobile (CA Mobile), Transfert d'argent international (Mobile Money).
+
+  ✓ Revenue lines underperforming vs prior year (ranked worst first):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT fc.name AS category,
+           fm.name AS revenue_line,
+           ROUND(SUM(fmd.real_value)::numeric, 0)           AS actual_2025,
+           ROUND(SUM(fmd.last_year_real_value)::numeric, 0) AS prior_2024,
+           ROUND(((SUM(fmd.real_value) - SUM(fmd.last_year_real_value)) * 100.0
+                 / NULLIF(ABS(SUM(fmd.last_year_real_value)), 0))::numeric, 1) AS yoy_pct
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name IN ('CA Mobile', 'Data Mobile', 'Mobile Money', 'P&L conso')
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
+      AND fmd.real_value IS NOT NULL AND fmd.last_year_real_value IS NOT NULL
+    GROUP BY fc.name, fm.name
+    HAVING SUM(fmd.real_value) < SUM(fmd.last_year_real_value)
+    ORDER BY yoy_pct ASC
+    LIMIT 20;
+
 YEAR-ON-YEAR (YoY) COMPARISON — for questions about growth, YoY, vs last year, evolution, year-over-year:
   Use last_year_real_value for the prior-year figure. Do NOT query two separate years.
 
   ✓ YoY comparison for key P&L metrics:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
     SELECT fm.name AS metric,
            ROUND(SUM(fmd.last_year_real_value)::numeric, 0) AS prior_year,
            ROUND(SUM(fmd.real_value)::numeric, 0)           AS current_year,
            ROUND((SUM(fmd.real_value) - SUM(fmd.last_year_real_value)) * 100.0
                  / NULLIF(ABS(SUM(fmd.last_year_real_value)), 0), 2)       AS yoy_pct
-    FROM financial_metrics_data fmd
+    FROM fmd
     JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
@@ -610,10 +1258,15 @@ YEAR-ON-YEAR (YoY) COMPARISON — for questions about growth, YoY, vs last year,
     GROUP BY fm.name ORDER BY current_year DESC;
 
   ✓ YoY monthly trend for a single metric:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
     SELECT EXTRACT(MONTH FROM fmd.date)::int AS month,
            ROUND(SUM(fmd.last_year_real_value)::numeric, 0) AS prior_year,
            ROUND(SUM(fmd.real_value)::numeric, 0)           AS current_year
-    FROM financial_metrics_data fmd
+    FROM fmd
     JOIN financial_metric fm ON fm.id = fmd.financial_metric_id
     WHERE UPPER(fm.name) LIKE '%EBITDA%'
       AND EXTRACT(YEAR FROM fmd.date) = 2025
@@ -623,23 +1276,85 @@ YEAR-ON-YEAR (YoY) COMPARISON — for questions about growth, YoY, vs last year,
 OPEX QUERIES — for questions about operating expenses, charges, coûts opérationnels:
   Category: 'Opex Consolidés'. Same JOIN path as revenue.
 
+  ⚠ MANDATORY RULE: NEVER return a single-row total for an OPEX question.
+    ANY OPEX question (single month, full year, trend) MUST GROUP BY ft.name to show the
+    breakdown by OpEx type. A single SUM with no GROUP BY is FORBIDDEN for OpEx.
+    ✗ WRONG: SELECT SUM(fmd.real_value) AS opex_may_2024 FROM fmd ... (single total — FORBIDDEN)
+    ✓ CORRECT: GROUP BY ft.name to return one row per OpEx type.
+
   ✓ OpEx breakdown by type for a year:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
     SELECT ft.name AS opex_type,
-           ROUND(SUM(fmd.real_value)::numeric, 0)   AS actual,
-           ROUND(SUM(fmd.budget_value)::numeric, 0) AS budget
-    FROM financial_metrics_data fmd
+           ROUND(SUM(fmd.real_value)::numeric, 0)            AS actual_m_fcfa,
+           ROUND(SUM(fmd.budget_value)::numeric, 0)          AS budget_m_fcfa,
+           ROUND(SUM(fmd.last_year_real_value)::numeric, 0)  AS prior_year_m_fcfa,
+           ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance
+    FROM fmd
     JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
     WHERE fc.name = 'Opex Consolidés'
       AND EXTRACT(YEAR FROM fmd.date) = 2025
       AND fmd.real_value IS NOT NULL
-    GROUP BY ft.name ORDER BY actual DESC;
+    GROUP BY ft.name ORDER BY actual_m_fcfa DESC;
+
+  ✓ Top N OpEx drivers (individual metrics) for a year — use this for "top drivers", "largest costs", "biggest expenses":
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT fm.name AS driver,
+           ft.name AS opex_type,
+           ROUND(SUM(fmd.real_value)::numeric, 0)   AS actual,
+           ROUND(SUM(fmd.budget_value)::numeric, 0) AS budget,
+           ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name = 'Opex Consolidés'
+      AND EXTRACT(YEAR FROM fmd.date) = 2024
+      AND fmd.real_value IS NOT NULL
+    GROUP BY fm.name, ft.name
+    ORDER BY actual DESC
+    LIMIT 5;
+
+  ✓ OpEx breakdown by type for a SINGLE MONTH (e.g. "what was opex for March 2025?"):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT ft.name AS opex_type,
+           ROUND(SUM(fmd.real_value)::numeric, 0)              AS actual_m_fcfa,
+           ROUND(SUM(fmd.budget_value)::numeric, 0)            AS budget_m_fcfa,
+           ROUND(SUM(fmd.last_year_real_value)::numeric, 0)    AS prior_year_m_fcfa,
+           ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name = 'Opex Consolidés'
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
+      AND EXTRACT(MONTH FROM fmd.date) = 3
+      AND fmd.real_value IS NOT NULL
+    GROUP BY ft.name
+    ORDER BY actual_m_fcfa DESC;
 
   ✓ Monthly OpEx trend:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
     SELECT EXTRACT(MONTH FROM fmd.date)::int AS month,
            ROUND(SUM(fmd.real_value)::numeric, 0) AS total_opex
-    FROM financial_metrics_data fmd
+    FROM fmd
     JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
@@ -647,6 +1362,50 @@ OPEX QUERIES — for questions about operating expenses, charges, coûts opérat
       AND EXTRACT(YEAR FROM fmd.date) = 2025
       AND fmd.real_value IS NOT NULL
     GROUP BY EXTRACT(MONTH FROM fmd.date) ORDER BY month;
+
+BFR / WORKING CAPITAL QUERIES — for questions about BFR, "Besoin en Fonds de Roulement", working capital,
+  "variation de BFR", "BFR opérationnel", or "sub-components of BFR":
+
+  ⚠ CRITICAL: BFR is NOT in cashflow_data. It lives in financial_metrics_data.
+    metric name: 'Variation de BFR opérationnel (+/-)'
+    financial_category: 'Cash Conso'
+    financial_type: 'CFFO'
+    Use the standard dedup CTE — NEVER query cashflow_data for BFR.
+
+  Related CFFO sub-components (other metrics under type='CFFO', category='Cash Conso'):
+    'Neutralisation de la var. de provisions incluses dans l''Ebitda (-)'
+    'Investissements bruts (y compris acquisitions de société) (-)'
+    'Investissements nets (Capex brutes - cession d''immo.) (-)'
+    'Cession d''immobilisations'
+    'Dividendes reçus des participations non consolidées (+)'
+    'Produit de cession des immobilisations corporelles et incorporelles (+)'
+    'Plan de restructuration'
+
+  ✓ BFR and CFFO sub-components for a specific quarter/year (e.g. Q2 2024):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT fm.name AS metric,
+           ROUND(SUM(fmd.real_value)::numeric, 0)          AS actual,
+           ROUND(SUM(fmd.budget_value)::numeric, 0)        AS budget,
+           ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name = 'Cash Conso'
+      AND ft.name = 'CFFO'
+      AND EXTRACT(YEAR FROM fmd.date) = 2024
+      AND EXTRACT(MONTH FROM fmd.date) BETWEEN 4 AND 6   -- Q2: Apr–Jun
+      AND fmd.real_value IS NOT NULL
+    GROUP BY fm.name
+    ORDER BY ABS(SUM(fmd.real_value) - SUM(fmd.budget_value)) DESC NULLS LAST;
+
+  Quarter month ranges: Q1=1–3, Q2=4–6, Q3=7–9, Q4=10–12
+  ✗ NEVER JOIN cashflow_data or cashflow_sections for BFR questions.
+  ✗ NEVER filter WHERE fm.name = 'Variation de BFR...' alone — include all CFFO metrics to show sub-components.
 
 CASH FLOW QUERIES — for questions about cash flow, trésorerie, FCF, liquidity, flux, cash position:
 
@@ -724,10 +1483,58 @@ CASH FLOW QUERIES — for questions about cash flow, trésorerie, FCF, liquidity
       AND cs.tbg_key IN ('RL01', 'RL03')
     ORDER BY cs.sequence_id;
 
+  ✓ Which months had negative cashflow in 2025 (ALWAYS use this exact pattern):
+    WITH latest AS (SELECT MAX(version_id) AS vid FROM cashflow_data WHERE year = 2025)
+    SELECT month_name AS month FROM (
+        SELECT 'January'   AS month_name, 1  AS mo, cd.jan  AS val FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'February',  2,  cd.feb FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'March',     3,  cd.mar FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'April',     4,  cd.apr FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'May',       5,  cd.may FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'June',      6,  cd.jun FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'July',      7,  cd.jul FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'August',    8,  cd.aug FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'September', 9,  cd.sep FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'October',   10, cd.oct FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'November',  11, cd.nov FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 'December',  12, cd.dec FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+    ) m WHERE val IS NOT NULL AND val < 0 ORDER BY mo;
+
+  ✓ Running cumulative cashflow by month for 2025 (ALWAYS use this exact pattern):
+    WITH latest AS (SELECT MAX(version_id) AS vid FROM cashflow_data WHERE year = 2025),
+    monthly AS (
+        SELECT 1 AS mo, SUM(cd.jan) AS val FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 2,  SUM(cd.feb) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 3,  SUM(cd.mar) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 4,  SUM(cd.apr) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 5,  SUM(cd.may) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 6,  SUM(cd.jun) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 7,  SUM(cd.jul) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 8,  SUM(cd.aug) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 9,  SUM(cd.sep) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 10, SUM(cd.oct) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 11, SUM(cd.nov) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+        UNION ALL SELECT 12, SUM(cd.dec) FROM cashflow_data cd JOIN cashflow_sections cs ON cs.id = cd.entity_id JOIN latest ON cd.version_id = latest.vid WHERE cd.year = 2025 AND cd.entity_type = 'section' AND cs.tbg_key = 'RL11'
+    )
+    SELECT mo AS month_num, val AS monthly_cashflow,
+           SUM(val) OVER (ORDER BY mo ROWS UNBOUNDED PRECEDING) AS cumulative_cashflow
+    FROM monthly ORDER BY mo;
+
   ✗ Do NOT use EXTRACT() or date columns on cashflow_data — they don't exist.
+  ✗ NEVER reference tbg_key on cashflow_data — tbg_key is a column on cashflow_sections only; always JOIN cashflow_sections to use it.
   ✗ Do NOT SUM across multiple rows without version_id filter — you will get inflated totals.
   ✗ Do NOT use cashflow_data for revenue questions — it is treasury/liquidity only.
   ✗ FCF is not a named column — use RL11 (Net Cash Flow) as the best available proxy.
+
+FOLLOW-UP / CONTINUATION QUERIES:
+  When the conversation history contains a previous SQL query, USE IT AS THE BASE.
+  Preserve the FROM / JOIN / WHERE structure; only change what the follow-up asks for.
+  • "now show Q4"            → change WHERE month filter to IN (10,11,12)
+  • "compare with last year" → add last_year_real_value to SELECT
+  • "break down by category" → add JOIN financial_categories, GROUP BY fc.name
+  • "top 5 only"             → add ORDER BY <metric> DESC LIMIT 5
+  • "filter for EBITDA"      → add WHERE fm.name = 'EBITDA' to existing query
+  Do NOT start from scratch when the previous SQL is a valid starting point.
 
 USE ONLY the tables and columns listed below.
 Do NOT invent table names or column names.
@@ -751,7 +1558,7 @@ def _make_write_sql_node(llm: ChatOllama):
 
         log.info("[attempt %d/%d] Writer invoked", retry + 1, _MAX_RETRIES + 1)
         t0 = time.monotonic()
-        response = llm.invoke(messages)
+        response = llm.invoke_streaming(messages)
         elapsed  = time.monotonic() - t0
 
         # Log raw LLM output for debugging
@@ -785,6 +1592,25 @@ def _make_write_sql_node(llm: ChatOllama):
 # Node 2 — sqlglot syntax validation (no LLM, no DB)
 # ---------------------------------------------------------------------------
 
+# All AST node types that can mutate or destroy data.
+_DESTRUCTIVE_TYPES = (
+    sexp.Delete,
+    sexp.Insert,
+    sexp.Update,
+    sexp.Drop,
+    sexp.TruncateTable,
+    sexp.Alter,
+    sexp.Create,
+    sexp.Command,   # catches raw COPY, VACUUM, SET, etc.
+)
+
+# Regex safety net used in execute_sql as a last-resort guard.
+_DESTRUCTIVE_RE = re.compile(
+    r"\b(DELETE|INSERT|UPDATE|DROP|TRUNCATE|ALTER|CREATE|REPLACE|MERGE|GRANT|REVOKE|COPY|VACUUM|LOCK)\b",
+    re.IGNORECASE,
+)
+
+
 def validate_syntax(state: DbPipelineState) -> dict:
     sql = state.get("sql", "").strip()
     if not sql:
@@ -798,10 +1624,20 @@ def validate_syntax(state: DbPipelineState) -> dict:
             log.warning("validate_syntax FAIL: %s", err)
             return {"syntax_error": err}
         stmt = stmts[0]
+
+        # Layer 1 — top-level statement must be SELECT or WITH…SELECT
         if not isinstance(stmt, (sexp.Select, sexp.With)):
             err = f"Only SELECT/WITH allowed. Got: {type(stmt).__name__}"
             log.warning("validate_syntax FAIL: %s", err)
             return {"syntax_error": err}
+
+        # Layer 2 — walk every AST node; reject any DML/DDL hiding inside CTEs
+        for node in stmt.walk():
+            if isinstance(node, _DESTRUCTIVE_TYPES):
+                err = f"Destructive statement forbidden inside query: {type(node).__name__}"
+                log.warning("validate_syntax FAIL: %s", err)
+                return {"syntax_error": err}
+
         log.info("validate_syntax PASS")
         return {"syntax_error": ""}
     except sqlglot.errors.ParseError as exc:
@@ -892,9 +1728,15 @@ def validate_semantic(state: DbPipelineState) -> dict:
     sql = state.get("sql", "").strip()
     if not sql:
         return {"semantic_error": "No SQL to validate."}
+
+    target_db = state.get("target_db", "")
     try:
-        explain(sql)
-        log.info("validate_semantic PASS")
+        if target_db:
+            from app.db.connection import explain_on
+            explain_on(sql, target_db)
+        else:
+            explain(sql)
+        log.info("validate_semantic PASS (db=%s)", target_db or "main")
         return {"semantic_error": "", "column_facts": ""}
     except Exception as exc:
         err = str(exc).split("\n")[0]
@@ -1043,7 +1885,7 @@ def _make_critique_sql_node(llm: ChatOllama):
             retry + 1, _MAX_RETRIES, _clip(error, 160),
         )
         t0 = time.monotonic()
-        response  = llm.invoke([
+        response  = llm.invoke_streaming([
             SystemMessage(content=system_msg),
             HumanMessage(content=user_msg),
         ])
@@ -1125,6 +1967,76 @@ def _route_after_critique(state: DbPipelineState) -> str:
     return "validate_syntax"   # always re-validate from scratch after a fix
 
 
+_MONTH_NAMES = {
+    1: "January", 2: "February", 3: "March",    4: "April",
+    5: "May",     6: "June",     7: "July",      8: "August",
+    9: "September", 10: "October", 11: "November", 12: "December",
+}
+
+_MONTH_ORDER: dict[str, int] = {
+    name.lower(): idx for idx, name in _MONTH_NAMES.items()
+}
+
+# Column names that commonly store month numbers (1-12)
+_MONTH_COL_NAMES = {
+    "month", "mois", "month_number", "month_no", "month_num",
+    "month_index", "m", "mo", "periode_mois",
+}
+
+
+def _resolve_month_names(rows: list[dict], cols: list[str]) -> list[dict]:
+    """
+    Convert integer month values (1-12) to month names in any column whose
+    name looks like a month-index column.  Mutates nothing — returns new rows.
+    Also strips trailing spaces from to_char-style padded month strings.
+    """
+    month_cols = []
+    for col in cols:
+        if col.lower() not in _MONTH_COL_NAMES:
+            continue
+        # Only convert if all non-null values are integers 1-12
+        vals = [r.get(col) for r in rows if r.get(col) is not None]
+        if vals and all(isinstance(v, int) and 1 <= v <= 12 for v in vals):
+            month_cols.append(col)
+
+    if not month_cols:
+        # Strip trailing spaces from to_char-padded strings (e.g. "January  ")
+        str_month_cols = [
+            col for col in cols
+            if col.lower() in _MONTH_COL_NAMES
+            and rows
+            and isinstance(rows[0].get(col), str)
+            and rows[0].get(col, "").strip().lower() in _MONTH_ORDER
+        ]
+        if not str_month_cols:
+            return rows
+        return [{**r, **{col: r[col].strip() for col in str_month_cols if isinstance(r.get(col), str)}} for r in rows]
+
+    new_rows = []
+    for r in rows:
+        nr = dict(r)
+        for col in month_cols:
+            v = nr.get(col)
+            if isinstance(v, int) and 1 <= v <= 12:
+                nr[col] = _MONTH_NAMES[v]
+        new_rows.append(nr)
+    return new_rows
+
+
+def _sort_by_month_order(rows: list[dict], cols: list[str]) -> list[dict]:
+    """
+    If any column contains month names, sort rows into chronological month order.
+    Handles both integer-converted names and to_char-padded strings.
+    """
+    for col in cols:
+        if col.lower() not in _MONTH_COL_NAMES:
+            continue
+        vals = [str(r.get(col, "")).strip().lower() for r in rows if r.get(col) is not None]
+        if vals and all(v in _MONTH_ORDER for v in vals):
+            return sorted(rows, key=lambda r: _MONTH_ORDER.get(str(r.get(col, "")).strip().lower(), 99))
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Node 6 — Execute SQL
 # ---------------------------------------------------------------------------
@@ -1134,10 +2046,24 @@ def execute_sql(state: DbPipelineState) -> dict:
     if not sql:
         return {"sql_error": "No SQL available for execution.", "rows": [], "cols": []}
 
-    log.info("execute_sql:\n%s", textwrap.indent(sql, "    "))
+    # Last-resort guard — catches anything that slipped past AST validation
+    m = _DESTRUCTIVE_RE.search(sql)
+    if m:
+        err = f"Execution blocked: destructive keyword '{m.group().upper()}' detected in SQL."
+        log.error("execute_sql BLOCKED: %s", err)
+        return {"sql_error": err, "rows": [], "cols": []}
+
+    target_db = state.get("target_db", "")
+    log.info("execute_sql (db=%s):\n%s", target_db or "main", textwrap.indent(sql, "    "))
     t0 = time.monotonic()
     try:
-        rows, cols = execute(sql)
+        if target_db:
+            from app.db.connection import execute_on
+            rows, cols = execute_on(sql, target_db)
+        else:
+            rows, cols = execute(sql)
+        rows = _resolve_month_names(rows, cols)
+        rows = _sort_by_month_order(rows, cols)
         log.info("execute_sql OK: %d rows, %d cols in %.1fs", len(rows), len(cols), time.monotonic() - t0)
         return {"rows": rows, "cols": cols, "sql_error": ""}
     except Exception as exc:
@@ -1150,45 +2076,99 @@ def execute_sql(state: DbPipelineState) -> dict:
 # ---------------------------------------------------------------------------
 
 _FMT_SYSTEM = """\
-You are a senior financial analyst presenting database query results to a Moov Benin executive.
+You are a senior financial analyst at a management consulting firm presenting database query results to the executive committee of Moov Benin (a West African telecom operator).
 
 CURRENCY: All monetary values are in FCFA (West African CFA franc). NEVER write $ or USD.
-NUMBERS:  Always use thousands separators — write 2,998,413 not 2998413.
+UNIT — CRITICAL: financial_metrics_data, cashflow_data, and capex_data values are stored in MILLIONS of FCFA.
+  A value of 4,683 means 4,683 M FCFA (i.e. 4.683 billion FCFA), NOT 4,683 FCFA.
+  In tables: column names ending in _m_fcfa or containing real_value/budget_value are in M FCFA.
+  In prose: write "4,683 M FCFA" or "4.7 billion FCFA" — NEVER "4,683 FCFA".
+  revenue_raw_data values (ca_global, ca_voix, etc.) are in actual FCFA (not millions).
+NUMBERS:  Use thousands separators in tables — 4,683. In prose, abbreviate: 4.7 billion FCFA, 150 M FCFA.
+  Rule: if the primary metric column ends with _m_fcfa, append " (M FCFA)" to that column header in the rendered table.
 
 CRITICAL — DATA FACTS are pre-computed in Python and are 100% accurate.
 You MUST copy numbers from DATA FACTS verbatim into your Summary and Key Insights.
-⚠ PEAK/TROUGH RULE: The PEAK is whatever DATA FACTS says PEAK is. Never scan the table
-to find a different row. If DATA FACTS says label='1' is the peak, then Month 1 is the peak —
-do not substitute a different month even if values nearby look higher. Copy the exact value.
+⚠ PEAK/TROUGH RULE: The PEAK is whatever DATA FACTS says PEAK is. Never scan the table to find a different row.
+⚠ SINGLE-ROW RULE: If DATA FACTS says "Row count: 1", NEVER write "peak equals trough" or "single recorded figure".
+  Instead, describe the total magnitude, state what portion of budget it represents (if budget column exists),
+  compare to prior year (if prior_year column exists), and comment on business implications.
+Month labels are always full names (January … December) — never write "Month N".
 Do NOT re-derive totals, peaks, shares, or trend direction from the table.
+
+OPEX ANALYSIS RULE — when the result contains an opex_type column (breakdown by OpEx type):
+  The Summary MUST state the grand total of actual_m_fcfa across all types, then name the largest cost category.
+  The Analysis must discuss cost structure: which types dominate, budget adherence per type, YoY change if available.
+  Never state "no comparative data available" if a prior_year_m_fcfa column is present in the result.
+  Key Insights must include one bullet on the largest OpEx driver and one on budget vs actual.
 
 OUTPUT FORMAT — use EXACTLY this structure (no deviations):
 
-## [Short descriptive title — 4–8 words matching the question, e.g. "Monthly CapEx Trend — 2025", "P&L Summary — 2024 vs 2025", "Distributor Commission Ranking — 2025"]
+## [Short descriptive title — 4–8 words, e.g. "Monthly CapEx Trend — 2025", "Top Suppliers by Spend — 2024", "EBITDA vs Budget Variance — Q1 2025"]
 
 **Summary**
-[2–3 sentences. Lead with the main finding. Use numbers from DATA FACTS exactly. State trend direction or comparison if applicable. Do NOT list everything — just the headline result.]
+[2–3 sentences. State the single most important finding first, with the exact number from DATA FACTS. Then state trend direction and period. Be direct — no preamble like "Based on" or "The data shows".]
 
 [Reproduce the data table exactly as provided — do not reformat, reorder, or omit rows. Keep all pipe characters.]
 
+**Analysis**
+[3–5 sentences of business reasoning. Go beyond restating facts: explain the WHY. What drives the peak or trough? Are there seasonal or cyclical patterns typical in West African telecom (e.g. budget cycles, infrastructure rollout seasons, rainy season subscriber churn)? What does the trend imply for next quarter? If this is a supplier/vendor ranking, comment on concentration risk or dependency. If it is a P&L or EBITDA metric, link the movement to likely operational causes. Draw inferences — do not re-list numbers already in the table.]
+
 **Key Insights**
-- **[Label]**: [value with context, e.g. "Peak: March 2025 — 2,341,000,000 FCFA (18.3% of total)"]
-- **[Label]**: [second finding, e.g. "Lowest: January — 980,000,000 FCFA"]
-- **[Label]**: [grand total or average from DATA FACTS]
-- **[Label]**: [trend direction or notable variance — omit if not meaningful]
+- **[Label]**: [value + % share or YoY context] — [one-sentence business implication or risk/opportunity]
+- **[Label]**: [second finding with magnitude] — [operational or strategic implication]
+- **[Label]**: [trend or pattern observed] — [what it signals for the next period]
+- **[Label]**: [anomaly, risk concentration, or standout outlier] — [recommended action or watch item]
 
-**Source**: [table(s) queried] | [period covered] | [N row(s) returned]
+⚠ KEY INSIGHTS RULE: Write ONLY bullets that are supported by data in the result table.
+  If budget_m_fcfa is present → write a budget variance bullet.
+  If prior_year_m_fcfa is present → write a YoY comparison bullet.
+  If those columns are ABSENT → skip those bullets entirely. NEVER write "N/A — No budget figure provided"
+  or "N/A — Single quarter precludes YoY comparison". Silence is better than a meaningless N/A bullet.
+  Replace any missing bullet with an observation that IS supported by the data (magnitude, trend, share).
 
-**Follow-up**: [One specific, actionable question the executive should ask next — not generic]
+**Data Source**: [table(s) queried] | [key columns: list from "Columns in result"] | [period: infer from data or query context] | [N rows returned]
+
+**Follow-up**: [One specific drill-down question that would identify root cause or support a decision — not generic like "Would you like more detail?"]
+
+QUARTERLY VARIANCE RULE — applies when result columns include q1_variance, q2_variance, q3_variance, q4_variance:
+  The prompt will include a line "QUARTERLY DATA AVAILABILITY: Data available: Q1 (Jan–Mar), Q2 (Apr–Jun) | No data yet: Q3 (Jul–Sep), Q4 (Oct–Dec)" (exact quarters vary).
+
+  After the main table, insert a "**Quarterly Trend**" section (before Analysis):
+
+  0. DATA SCOPE — first sentence MUST state which quarters are covered and which are pending:
+     "Analysis covers [available quarters] ([months]). [missing quarters] data not yet available."
+     Example: "Analysis covers Q1 (Jan–Mar) and Q2 (Apr–Jun). Q3 and Q4 data not yet available."
+
+  1. TREND DIRECTION — compare the absolute quarterly variances across available quarters only:
+     - IMPROVING: absolute variance shrinking quarter-over-quarter
+     - WORSENING: absolute variance growing quarter-over-quarter
+     - MIXED or STABLE: no consistent direction
+     State this in one sentence for the top 2–3 metrics.
+
+  2. WORST QUARTER — name the quarter with the largest absolute deviation for the top metric.
+
+  3. YEAR-END PROJECTION — based only on available quarters:
+     Sum available quarterly variances, divide by count of available quarters, multiply by 4.
+     State: "Based on [N] quarters of data, full-year variance is projected at ~X Bn FCFA."
+     If only 1 quarter is available, caveat: "projection based on a single quarter — treat as indicative."
+
+  4. ONE management action tied to the trend:
+     - IMPROVING → "Corrective controls appear to be working; maintain current oversight cadence."
+     - WORSENING → "Escalation recommended: variance is accelerating — review cost authorisation thresholds."
+     - MIXED     → "Investigate Q[N] spike before drawing conclusions on structural trend."
+
+  Key Insights must include one bullet labelled **Trend Signal** that states: direction + quarters covered + projection.
 
 STRICT RULES:
-- The ## title MUST reflect the actual question topic.
-- Key Insights: write exactly 3–4 bullets. Use **bold labels**. Numbers must come from DATA FACTS.
-- Reproduce the table AS-IS including all | characters — do not strip pipes or collapse columns.
-- NEVER output SQL, column types, or any technical detail.
-- NEVER invent numbers not present in the results.
-- If a cell shows "(null)" → write "no data". NEVER write "None" or "null".
-- Do NOT start with "I'm sorry", "Based on", or "The query returned".
+- The ## title MUST reflect the actual question topic and period.
+- The **Analysis** section is MANDATORY — minimum 3 sentences. Never skip it, never replace it with bullets.
+- Key Insights: write exactly 4 bullets. Each must end with a business implication after the em dash (—).
+- Reproduce the table AS-IS including all | characters.
+- NEVER output SQL, column types, or any technical internals.
+- NEVER invent numbers not present in the results or DATA FACTS.
+- If a cell shows "(null)" → write "no data available". NEVER write "None" or "null".
+- Do NOT start with "I'm sorry", "Based on", "The query returned", or "Here is".
 - {language_instruction}
 """
 
@@ -1324,24 +2304,63 @@ def _build_chart_spec(cols: list[str], rows: list[dict], question: str) -> dict 
             entry[y] = v  # None serialises to null in JSON
         data.append(entry)
 
-    # Axis labels — humanise the column name
+    # Peak / trough indices and stats (needed for axis label unit detection)
+    primary_vals = [(_to_float(r.get(y_keys[0])), i) for i, r in enumerate(data)]
+    primary_vals_nn = [(v, i) for v, i in primary_vals if v is not None]
+    peak_idx   = max(primary_vals_nn, key=lambda x: x[0])[1] if primary_vals_nn else None
+    trough_idx = min(primary_vals_nn, key=lambda x: x[0])[1] if primary_vals_nn else None
+    nums_nn    = [v for v, _ in primary_vals_nn]
+    avg_value  = sum(nums_nn) / len(nums_nn) if nums_nn else None
+
+    # Detect unit from column name and value magnitude
+    _pct_keywords = ("pct", "rate", "ratio", "percent", "evol", "change", "growth", "margin", "share", "taux")
+    y_col_lower = y_keys[0].lower() if y_keys else ""
+    if any(k in y_col_lower for k in _pct_keywords):
+        unit = "%"
+        y_suffix = " (%)"
+    else:
+        unit = "FCFA"
+        avg_abs = sum(abs(v) for v in nums_nn) / len(nums_nn) if nums_nn else 0
+        if avg_abs >= 1e9:
+            y_suffix = " (Bn FCFA)"
+        elif avg_abs >= 1e6:
+            y_suffix = " (M FCFA)"
+        else:
+            y_suffix = " (FCFA)"
+
+    # Axis labels — humanised column names with unit context
     x_label = x_key.replace("_", " ").title()
-    y_label = (y_keys[0].replace("_", " ").title() if len(y_keys) == 1 else "Value")
+    y_label = (y_keys[0].replace("_", " ").title() + y_suffix) if len(y_keys) == 1 else f"Value ({unit})"
+
+    # Chart title derived from column names
+    y_human = ", ".join(k.replace("_", " ").title() for k in y_keys[:2])
+    x_human = x_key.replace("_", " ").title()
+    if is_time:
+        raw_title = f"{y_human} — Monthly Trend"
+    elif is_rank:
+        raw_title = f"{y_human} — Ranking"
+    else:
+        raw_title = f"{y_human} by {x_human}"
+    title = raw_title[:80]
 
     # Trend analysis from the full row set
     trend_analysis = _compute_trend_analysis(rows, x_key, y_keys[0] if y_keys else None)
 
     return {
-        "chart_type":     chart_type,
-        "title":          question[:80],
-        "data":           data,
-        "x_key":          x_key,
-        "y_keys":         y_keys,
-        "colors":         _PALETTE[: len(y_keys)],
-        "unit":           "FCFA",
-        "x_label":        x_label,
-        "y_label":        y_label,
-        "trend_analysis": trend_analysis,
+        "chart_type":       chart_type,
+        "title":            title,
+        "data":             data,
+        "x_key":            x_key,
+        "y_keys":           y_keys,
+        "colors":           _PALETTE[: len(y_keys)],
+        "unit":             unit,
+        "x_label":          x_label,
+        "y_label":          y_label,
+        "trend_analysis":   trend_analysis,
+        "peak_idx":         peak_idx,
+        "trough_idx":       trough_idx,
+        "avg_value":        avg_value,
+        "y_begin_at_zero":  chart_type in ("bar", "bar_horizontal"),
     }
 
 
@@ -1414,7 +2433,11 @@ def _compute_data_facts(cols: list[str], rows: list[dict]) -> str:
             return True
         return False
 
-    numeric_col = label_col = None
+    # Percentage/rate column names — when present, prefer these over raw value columns
+    # so peak/trough reflect the best/worst % change, not highest absolute value.
+    _PCT_SUFFIXES = ("_pct", "_rate", "_share", "_ratio", "_variance", "pct", "rate")
+
+    numeric_col = label_col = pct_col = None
     for c in cols:
         vals = [r.get(c) for r in rows if r.get(c) is not None]
         if not vals:
@@ -1424,9 +2447,17 @@ def _compute_data_facts(cols: list[str], rows: list[dict]) -> str:
         if is_numeric and not is_dim:
             if numeric_col is None:
                 numeric_col = c
+            # Track first pct/rate column separately
+            if pct_col is None and any(c.lower().endswith(s) for s in _PCT_SUFFIXES):
+                pct_col = c
         else:
             if label_col is None:
                 label_col = c
+
+    # For comparison/variance queries, use the % column so peak = least decline,
+    # trough = worst decline — more meaningful than picking by absolute value.
+    if pct_col and pct_col != numeric_col:
+        numeric_col = pct_col
 
     if not numeric_col:
         return ""
@@ -1439,25 +2470,51 @@ def _compute_data_facts(cols: list[str], rows: list[dict]) -> str:
     total      = sum(v for v, _ in float_vals)
     max_val, max_row = max(float_vals, key=lambda x: x[0])
     min_val, min_row = min(float_vals, key=lambda x: x[0])
-    max_share  = (max_val / total * 100) if total else 0
     max_label  = str(max_row.get(label_col or cols[0], ""))
+    min_label  = str(min_row.get(label_col or cols[0], ""))
 
-    min_label = str(min_row.get(label_col or cols[0], ""))
-    facts = [
-        f"DATA FACTS — AUTHORITATIVE. Copy these numbers verbatim. DO NOT re-derive from the table:",
-        f"  • PEAK  (highest): label={max_label!r}  value={max_val:,.2f}  share={max_share:.1f}% of total",
-        f"  • TROUGH (lowest): label={min_label!r}  value={min_val:,.2f}",
-        f"  • Grand total    : {total:,.2f}",
-        f"  • Row count      : {len(rows)}",
-        f"  • Metric column  : {numeric_col}  |  Label column: {label_col or cols[0]}",
-    ]
+    # For pct/rate columns: summing percentages is meaningless — show range instead.
+    is_pct_col = any(numeric_col.lower().endswith(s) for s in _PCT_SUFFIXES)
 
-    # Flag if multiple rows are numeric for trend direction
-    if len(float_vals) >= 3:
-        ordered_vals = [v for v, _ in float_vals]
-        increases = sum(1 for i in range(1, len(ordered_vals)) if ordered_vals[i] > ordered_vals[i-1])
-        direction = "mostly increasing" if increases > len(ordered_vals) // 2 else "mostly decreasing" if increases < len(ordered_vals) // 2 else "mixed"
-        facts.append(f"  • Trend direction: {direction}")
+    # Single-row result: skip peak/trough entirely, just state the value
+    if len(float_vals) == 1:
+        unit_hint = " M FCFA" if "_m_fcfa" in numeric_col.lower() else ""
+        facts = [
+            f"DATA FACTS — AUTHORITATIVE. Copy these numbers verbatim. DO NOT re-derive from the table:",
+            f"  • Value: {max_val:,.2f}{unit_hint}",
+            f"  • Row count: 1 (single data point — do NOT write 'peak = trough')",
+            f"  • Metric column: {numeric_col}  |  Label column: {label_col or cols[0]}",
+            f"  NOTE: This is a single aggregate value. Do NOT say 'peak equals trough'. Focus analysis on magnitude, budget comparison, and business context.",
+        ]
+        return "\n".join(facts)
+
+    if is_pct_col:
+        # PEAK = least decline (closest to 0 / highest), TROUGH = worst decline (most negative)
+        peak_label  = "BEST (least decline)" if max_val < 0 else "BEST"
+        trough_label = "WORST (most decline)" if min_val < 0 else "WORST"
+        facts = [
+            f"DATA FACTS — AUTHORITATIVE. Copy these numbers verbatim. DO NOT re-derive from the table:",
+            f"  • {peak_label}: label={max_label!r}  value={max_val:,.2f}%",
+            f"  • {trough_label}: label={min_label!r}  value={min_val:,.2f}%",
+            f"  • Row count  : {len(rows)}",
+            f"  • Metric column: {numeric_col} (% change)  |  Label column: {label_col or cols[0]}",
+        ]
+    else:
+        max_share = (max_val / total * 100) if total else 0
+        facts = [
+            f"DATA FACTS — AUTHORITATIVE. Copy these numbers verbatim. DO NOT re-derive from the table:",
+            f"  • HIGHEST: label={max_label!r}  value={max_val:,.2f}  share={max_share:.1f}% of total",
+            f"  • LOWEST : label={min_label!r}  value={min_val:,.2f}",
+            f"  • Grand total    : {total:,.2f}",
+            f"  • Row count      : {len(rows)}",
+            f"  • Metric column  : {numeric_col}  |  Label column: {label_col or cols[0]}",
+        ]
+        # Trend direction only makes sense for time-series numeric values
+        if len(float_vals) >= 3:
+            ordered_vals = [v for v, _ in float_vals]
+            increases = sum(1 for i in range(1, len(ordered_vals)) if ordered_vals[i] > ordered_vals[i-1])
+            direction = "mostly increasing" if increases > len(ordered_vals) // 2 else "mostly decreasing" if increases < len(ordered_vals) // 2 else "mixed"
+            facts.append(f"  • Trend direction: {direction}")
 
     return "\n".join(facts)
 
@@ -1509,24 +2566,64 @@ def _format_fallback(rows: list[dict], cols: list[str], question: str,
     return {"answer": answer, "chart_specs": [chart_spec] if chart_spec else []}
 
 
-def _source_context(sql: str, rows: list[dict]) -> str:
-    """Derive a short validation line from the SQL and result size."""
+def _source_context(sql: str, rows: list[dict], cols: list[str]) -> str:
+    """Derive a validation/provenance line from the SQL, result size, and column list."""
     tables = sorted(_referenced_tables(sql))
     table_str = ", ".join(tables) if tables else "database"
     n = len(rows)
     row_str = f"{n} row" if n == 1 else f"{n} rows"
 
-    # Try to extract year/period filter from SQL text for context
+    # Period from SQL year filter
     year_m = re.search(r"\b(20\d{2})\b", sql)
-    period = f" for {year_m.group(1)}" if year_m else ""
+    period = f" — {year_m.group(1)}" if year_m else ""
 
-    return f"{table_str}{period} | {row_str} returned"
+    # Key columns (exclude FK/id suffixes and trivial keys)
+    key_cols = [c for c in cols if not c.endswith("_id") and c not in ("id",)][:5]
+    col_str = f" | columns: {', '.join(key_cols)}" if key_cols else ""
+
+    return f"{table_str}{period} | {row_str} returned{col_str}"
 
 
 _LANG_INSTRUCTIONS = {
     "fr": "Répondez en français. Toutes les réponses, analyses et libellés doivent être en français.",
     "en": "Respond in English.",
 }
+
+_QUARTER_MONTHS = {
+    "q1_variance": ("Q1", "Jan–Mar"),
+    "q2_variance": ("Q2", "Apr–Jun"),
+    "q3_variance": ("Q3", "Jul–Sep"),
+    "q4_variance": ("Q4", "Oct–Dec"),
+}
+
+
+def _detect_quarterly_availability(rows: list[dict], cols: list[str]) -> str:
+    """
+    If the result contains q1_variance…q4_variance columns, return a one-line
+    data-availability summary so the LLM knows which quarters are populated.
+
+    Returns empty string when no quarterly columns are present.
+    """
+    present = [c for c in ["q1_variance", "q2_variance", "q3_variance", "q4_variance"] if c in cols]
+    if not present:
+        return ""
+
+    available, missing = [], []
+    for col in ["q1_variance", "q2_variance", "q3_variance", "q4_variance"]:
+        label, months = _QUARTER_MONTHS[col]
+        has_data = any(r.get(col) is not None for r in rows)
+        if has_data:
+            available.append(f"{label} ({months})")
+        else:
+            missing.append(f"{label} ({months})")
+
+    parts = []
+    if available:
+        parts.append(f"Data available: {', '.join(available)}")
+    if missing:
+        parts.append(f"No data yet: {', '.join(missing)}")
+
+    return "QUARTERLY DATA AVAILABILITY: " + " | ".join(parts)
 
 
 def _make_format_answer_node(llm: ChatOllama):
@@ -1564,9 +2661,10 @@ def _make_format_answer_node(llm: ChatOllama):
             )}
 
         # ── Build table, facts, chart spec, and source context ───────────
+        snapshot_label = state.get("snapshot_label", "")
         table      = _build_ascii_table(rows, cols)
         facts      = _compute_data_facts(cols, rows)
-        source     = _source_context(sql, rows)
+        source     = _source_context(sql, rows, cols)
         chart_spec = _build_chart_spec(cols, rows, question)
         if chart_spec:
             log.info("format_answer: chart_type=%s x=%s y=%s",
@@ -1577,16 +2675,26 @@ def _make_format_answer_node(llm: ChatOllama):
         lang_instr = _LANG_INSTRUCTIONS.get(lang, _LANG_INSTRUCTIONS["en"])
         fmt_system = _FMT_SYSTEM.format(language_instruction=lang_instr)
 
+        snapshot_ctx  = f"Database snapshot: {snapshot_label}\n" if snapshot_label else ""
+        col_ctx       = f"Columns in result: {', '.join(cols)}\n" if cols else ""
+        quarterly_ctx = _detect_quarterly_availability(rows, cols)
+        quarterly_line = f"{quarterly_ctx}\n" if quarterly_ctx else ""
+
         log.info("format_answer: narrating %d rows via LLM (lang=%s, showing up to %d)",
                  len(rows), lang, _LLM_TABLE_ROW_CAP)
+        if quarterly_ctx:
+            log.info("format_answer: %s", quarterly_ctx)
         t0 = time.monotonic()
         try:
-            response = llm.invoke([
+            response = llm.invoke_streaming([
                 SystemMessage(content=fmt_system),
                 HumanMessage(content=(
                     f"User question: {question}\n\n"
+                    f"{col_ctx}"
+                    f"{quarterly_line}"
+                    f"{snapshot_ctx}"
                     f"{facts}\n\n"
-                    f"Query source (for the **Source** line): {source}\n\n"
+                    f"Query source (for the **Data Source** line): {source}\n\n"
                     f"Result ({len(rows)} row(s), first {_LLM_TABLE_ROW_CAP} shown):\n{table}"
                 )),
             ])
@@ -1608,20 +2716,24 @@ def _make_format_answer_node(llm: ChatOllama):
 # ---------------------------------------------------------------------------
 
 def _build_db_pipeline(model: str | None = None) -> object:
-    llm = _make_llm(model)
+    sql_llm       = _make_llm(model)
+    narration_model = settings.OLLAMA_NARRATION_MODEL or model or settings.OLLAMA_MODEL
+    narration_llm = _make_llm(narration_model)
     g   = StateGraph(DbPipelineState)
 
+    g.add_node("resolve_snapshot",  resolve_snapshot)
     g.add_node("retrieve_schema",   retrieve_schema)
-    g.add_node("write_sql",         _make_write_sql_node(llm))
+    g.add_node("write_sql",         _make_write_sql_node(sql_llm))
     g.add_node("validate_syntax",   validate_syntax)
     g.add_node("validate_tables",   validate_tables)
     g.add_node("validate_semantic", validate_semantic)
-    g.add_node("critique_sql",      _make_critique_sql_node(llm))
+    g.add_node("critique_sql",      _make_critique_sql_node(sql_llm))
     g.add_node("execute_sql",       execute_sql)
-    g.add_node("format_answer",     _make_format_answer_node(llm))
+    g.add_node("format_answer",     _make_format_answer_node(narration_llm))
 
-    g.set_entry_point("retrieve_schema")
-    g.add_edge("retrieve_schema", "write_sql")
+    g.set_entry_point("resolve_snapshot")
+    g.add_edge("resolve_snapshot",  "retrieve_schema")
+    g.add_edge("retrieve_schema",   "write_sql")
     g.add_edge("write_sql",       "validate_syntax")
 
     g.add_conditional_edges(
@@ -1661,29 +2773,120 @@ def _get_db_pipeline(model: str | None = None) -> object:
 # ---------------------------------------------------------------------------
 
 _INTENT_CLASSIFIER_PROMPT = """\
-Classify the user's question as one of:
-- "definition": ONLY asking for explanation/definition of a term (e.g., "what is CAPEX", "explain EBITDA")
-- "data_query": asking for data, metrics, numbers, trends, or analysis from the database (e.g., "show me sales", "what was the trend", "how much did we spend")
-- "both": asking BOTH a definition AND a data/trend question in the same message (e.g., "what is CAPEX? what was the monthly trend?", "explain ARPU and show me the 2024 values")
-- "other": something else (e.g., small talk, greetings, off-topic)
+Classify the user's question as exactly one of these five labels:
+  definition   — ONLY asking for an explanation or definition of a financial term
+  data_query   — asking for data, numbers, trends, or analysis from the database
+  both         — asking BOTH a definition AND data in the same message
+  out_of_scope — asking about something the financial database cannot answer:
+                 external regulatory decrees, tax law amendments, court rulings,
+                 government policy documents, news events, competitor information,
+                 or any causal "why" question that requires legal/regulatory documents
+                 not stored in the database
+  other        — greetings, small talk, or completely off-topic
 
-Respond with ONLY the classification (one word: "definition", "data_query", "both", or "other").
+The question may be in English OR French. Classify based on meaning, not language.
+
+English examples:
+  "What is CAPEX?"                                          → definition
+  "Show me monthly revenue for 2025"                        → data_query
+  "What is EBITDA and what was it in 2024?"                 → both
+  "Hello, how are you?"                                     → other
+  "Which decree triggered the variance in Redevances?"      → out_of_scope
+  "What tax law caused the OPEX increase?"                  → out_of_scope
+  "Which regulatory amendment changed the fee structure?"   → out_of_scope
+  "Why did the government change roaming fees?"             → out_of_scope
+
+French examples:
+  "Qu'est-ce que l'EBITDA ?"                                → definition
+  "Montre-moi l'évolution du chiffre d'affaires"            → data_query
+  "Qu'est-ce que le churn et quel est son taux ?"           → both
+  "Quel décret a causé la variance des redevances ?"        → out_of_scope
+  "Quelle ordonnance fiscale a modifié les charges ?"       → out_of_scope
+  "Bonjour, comment ça va ?"                                → other
+
+Respond with ONLY one word — the label itself. No punctuation, no explanation.
 
 Question: {question}
 Classification:"""
 
 
+_OUT_OF_SCOPE_TEMPLATE_EN = """\
+This question asks about external regulatory or legal information (decrees, tax ordinances, policy amendments) that is not stored in this database.
+
+The TBG Copilot database contains **financial metrics only** — actual vs. budget values, monthly trends, OpEx, CapEx, revenue, and KPIs for Moov Benin. It does not hold regulatory documents, legal texts, or government decree archives.
+
+**What I can tell you from the database:**
+- The exact variance in Redevances régulateur (actual vs. budget, vs. prior year) for any month/year
+- Whether the variance is isolated to one month or part of a sustained trend
+- How Redevances compares to other OpEx categories
+
+To identify the specific regulatory trigger, consult:
+- ARCEP Bénin (the regulator) published decree logs
+- Moov Benin's legal/regulatory affairs team
+- The company's annual report regulatory section
+
+Would you like me to pull the Redevances régulateur data so you can cross-reference it with the regulation timeline?
+"""
+
+_OUT_OF_SCOPE_TEMPLATE_FR = """\
+Cette question porte sur des informations réglementaires ou juridiques externes (décrets, ordonnances fiscales, amendements) qui ne sont pas stockées dans cette base de données.
+
+La base TBG Copilot contient uniquement des **métriques financières** — valeurs réalisées vs. budget, tendances mensuelles, OpEx, CapEx, revenus et KPIs de Moov Bénin. Elle ne contient pas de documents réglementaires, de textes juridiques ni d'archives de décrets gouvernementaux.
+
+**Ce que je peux vous fournir depuis la base :**
+- L'écart exact des Redevances régulateur (réalisé vs. budget, vs. N-1) pour n'importe quel mois/année
+- Si l'écart est isolé à un mois ou s'inscrit dans une tendance durable
+- La comparaison des Redevances avec les autres catégories OpEx
+
+Pour identifier le déclencheur réglementaire précis, consultez :
+- Les journaux de décrets publiés par l'ARCEP Bénin
+- L'équipe affaires juridiques/réglementaires de Moov Bénin
+- La section réglementaire du rapport annuel de l'entreprise
+
+Souhaitez-vous que je récupère les données Redevances régulateur pour les croiser avec la chronologie réglementaire ?
+"""
+
+
+def _get_out_of_scope_answer(question: str, language: str = "en") -> str:
+    """Return a clear out-of-scope message when the question requires external regulatory/legal data."""
+    q_lower = question.lower()
+    # Try to detect what metric the user is asking about
+    metric_hint = ""
+    for kw in ("redevance", "redevances", "opex", "capex", "revenue", "charge", "frais"):
+        if kw in q_lower:
+            metric_hint = kw
+            break
+
+    if language == "fr":
+        return _OUT_OF_SCOPE_TEMPLATE_FR
+    return _OUT_OF_SCOPE_TEMPLATE_EN
+
+
 def _classify_question_intent(llm: OllamaLLM, question: str) -> str:
-    """Use LLM to classify if question is asking for definition, data, both, or other."""
+    """Use LLM to classify if question is asking for definition, data, both, out_of_scope, or other."""
+    # Fast keyword pre-check for obvious out-of-scope patterns before calling the LLM
+    _OOS_KEYWORDS = (
+        "decree", "décret", "ordonnance", "ordinance", "regulation amendment",
+        "tax law", "loi fiscale", "loi de finance", "amendement", "amendment",
+        "court ruling", "jugement", "tribunal", "politique gouvernementale",
+        "government policy", "legislative", "législatif", "arcep ruling",
+        "which law", "quelle loi", "quel texte", "what regulation caused",
+        "quelle réglementation", "triggered by", "déclenchée par",
+    )
+    q_lower = question.lower()
+    if any(kw in q_lower for kw in _OOS_KEYWORDS):
+        log.info("Question pre-classified as out_of_scope via keyword match")
+        return "out_of_scope"
+
     try:
         prompt = _INTENT_CLASSIFIER_PROMPT.format(question=question)
-        response = llm.invoke([
+        response = llm.invoke_streaming([
             SystemMessage(content="You are a question classifier."),
             HumanMessage(content=prompt),
         ])
         classification = response.content.strip().lower()
 
-        valid = ("definition", "data_query", "both", "other")
+        valid = ("definition", "data_query", "both", "out_of_scope", "other")
         if classification not in valid:
             log.warning("Unexpected classification output: %s — defaulting to data_query", classification)
             return "data_query"
@@ -1806,7 +3009,7 @@ def _get_definition_answer(question: str, llm: OllamaLLM, language: str = "en", 
         user_prompt = question
 
     try:
-        response = llm.invoke([
+        response = llm.invoke_streaming([
             SystemMessage(content=system_content),
             HumanMessage(content=user_prompt),
         ])
@@ -1893,6 +3096,8 @@ async def run_db_agent(
     language: str = "en",
 ) -> dict:
     import asyncio
+    from app.agents.semantic_cache import semantic_cache
+    from app.agents.schema_retriever import embed_text
 
     t_start       = time.monotonic()
     thread_id     = f"db:{session_id}:{conversation_id}"
@@ -1913,10 +3118,39 @@ async def run_db_agent(
         inference_time = round(time.monotonic() - t_start, 2)
         return {"answer": answer, "charts": [], "inference_time": inference_time}
 
+    if classification == "out_of_scope":
+        answer = _get_out_of_scope_answer(message, language=language)
+        log.info("Out-of-scope question detected — returning scope clarification")
+        history_turns.append(f"Q: {message}\nA: {answer}")
+        _conversation_history[thread_id] = history_turns
+        inference_time = round(time.monotonic() - t_start, 2)
+        return {"answer": answer, "charts": [], "inference_time": inference_time}
+
     definition_prefix = ""
     if classification == "both":
         log.info("Combined question detected — answering definition then querying data")
         definition_prefix = _get_definition_answer(message, llm, language=language, definition_only=True)
+
+    # ─────────────────────────────────────────────────────────────
+    # Semantic cache check (skip for definition-only questions)
+    # ─────────────────────────────────────────────────────────────
+    q_embedding = await asyncio.to_thread(embed_text, message)
+    cached = semantic_cache.get(message, q_embedding)
+    if cached is not None:
+            cached_answer = cached["answer"]
+            if definition_prefix:
+                cached_answer = definition_prefix + "\n\n---\n\n" + cached_answer
+            history_turns.append(f"User: {message}\nAnswer (cached): {cached_answer[:300]}")
+            _conversation_history[thread_id] = history_turns
+            return {
+                "answer":         cached_answer,
+                "charts":         [],
+                "inference_time": round(time.monotonic() - t_start, 2),
+                "sql":            cached["sql"],
+                "tables_queried": sorted(_referenced_tables(cached["sql"])) if cached["sql"] else [],
+                "row_count":      len(cached["rows"]),
+                "cache_hit":      True,
+            }
 
     # ─────────────────────────────────────────────────────────────
     # Proceed with normal SQL pipeline for data queries
@@ -1930,6 +3164,8 @@ async def run_db_agent(
         "question":         message,
         "history":          history_text,
         "language":         language,
+        "target_db":        "",
+        "snapshot_label":   "",
         "retrieved_schema": "",
         "allowed_tables":   [],
         "sql":              "",
@@ -1953,13 +3189,36 @@ async def run_db_agent(
 
     answer      = result.get("answer") or "I was unable to generate a response."
     chart_specs = result.get("chart_specs", [])
+    sql         = result.get("sql", "")
+    tables_queried = sorted(_referenced_tables(sql)) if sql else []
+    rows        = result.get("rows", [])
+    cols        = result.get("cols", [])
+    row_count   = len(rows)
+
+    # Store in semantic cache if pipeline succeeded (has SQL + non-error answer)
+    error_phrases = ("unable to generate", "could not", "error", "failed")
+    pipeline_ok = bool(sql) and not any(p in answer.lower() for p in error_phrases)
+    if pipeline_ok:
+        semantic_cache.set(message, sql, rows, cols, answer, embedding=q_embedding)
 
     if definition_prefix:
         answer = definition_prefix + "\n\n---\n\n" + answer
 
-    history_turns.append(f"Q: {message}\nA: {answer}")
+    history_entry = f"User: {message}"
+    if sql:
+        history_entry += f"\nSQL:\n{sql}"
+    history_entry += f"\nAnswer: {answer[:300]}"
+    history_turns.append(history_entry)
     _conversation_history[thread_id] = history_turns
-    return {"answer": answer, "charts": chart_specs, "inference_time": inference_time}
+    return {
+        "answer": answer,
+        "charts": chart_specs,
+        "inference_time": inference_time,
+        "sql": sql,
+        "tables_queried": tables_queried,
+        "row_count": row_count,
+        "cache_hit": False,
+    }
 
 
 async def run_db_agent_stream(
@@ -1974,6 +3233,8 @@ async def run_db_agent_stream(
     Events: progress, token, charts, done, error
     """
     import asyncio, json as _json
+    from app.agents.semantic_cache import semantic_cache
+    from app.agents.schema_retriever import embed_text
 
     def _sse(event: str, data) -> str:
         return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
@@ -1983,14 +3244,33 @@ async def run_db_agent_stream(
     history_turns = _conversation_history.get(thread_id, [])
     history_text  = "\n".join(history_turns[-6:])
 
-    yield _sse("progress", {"message": "Classifying question…"})
+    # ── Semantic cache check ──────────────────────────────────────────────────
+    q_embedding = await asyncio.to_thread(embed_text, message)
+    cached = semantic_cache.get(message, q_embedding)
+    if cached is not None:
+            yield _sse("progress", {"message": "Cache hit — returning cached result", "step": "cache"})
+            cached_answer = cached["answer"]
+            yield _sse("token", {"text": cached_answer})
+            history_turns.append(f"User: {message}\nAnswer (cached): {cached_answer[:300]}")
+            _conversation_history[thread_id] = history_turns
+            yield _sse("done", {
+                "inference_time": round(time.monotonic() - t_start, 2),
+                "charts":         [],
+                "sql":            cached["sql"],
+                "tables_queried": sorted(_referenced_tables(cached["sql"])) if cached["sql"] else [],
+                "row_count":      len(cached["rows"]),
+                "cache_hit":      True,
+            })
+            return
+
+    yield _sse("progress", {"message": "Classifying question…", "step": "classify"})
 
     llm = _make_llm(model)
     classification = await asyncio.to_thread(_classify_question_intent, llm, message)
 
     definition_prefix = ""
     if classification == "definition":
-        yield _sse("progress", {"message": "Generating definition…"})
+        yield _sse("progress", {"message": "Generating definition…", "step": "define"})
         full_answer = ""
         try:
             for token in _get_definition_tokens(message, llm, language=language):
@@ -2006,8 +3286,18 @@ async def run_db_agent_stream(
         yield _sse("done", {"inference_time": inference_time, "charts": []})
         return
 
+    if classification == "out_of_scope":
+        yield _sse("progress", {"message": "Checking scope…", "step": "scope"})
+        full_answer = _get_out_of_scope_answer(message, language=language)
+        yield _sse("token", {"text": full_answer})
+        history_turns.append(f"Q: {message}\nA: {full_answer}")
+        _conversation_history[thread_id] = history_turns
+        inference_time = round(time.monotonic() - t_start, 2)
+        yield _sse("done", {"inference_time": inference_time, "charts": []})
+        return
+
     if classification == "both":
-        yield _sse("progress", {"message": "Generating definition…"})
+        yield _sse("progress", {"message": "Generating definition…", "step": "define"})
         try:
             for token in _get_definition_tokens(message, llm, language=language, definition_only=True):
                 definition_prefix += token
@@ -2019,19 +3309,17 @@ async def run_db_agent_stream(
         yield _sse("token", {"text": "\n\n---\n\n"})
 
     elif classification == "data_query":
-        # If the question mentions a known financial term, stream a brief one-liner intro
+        # If the question mentions a known financial term, add a brief intro to prefix the answer.
+        # We do NOT emit this as an early token — it will be streamed with the answer.
         term_entry = _lookup_term(message)
         if term_entry:
             lang_key = f"definition_{language}" if language in ("en", "fr") else "definition_en"
             full_def = term_entry.get(lang_key) or term_entry.get("definition_en", "")
-            # First sentence only
             first_sentence = full_def.split(".")[0].strip() + "." if "." in full_def else full_def
-            intro = f"**{term_entry['term']}**: {first_sentence}\n\n---\n\n"
-            definition_prefix = intro
-            yield _sse("token", {"text": intro})
-            log.info("data_query: added brief term intro for %s", term_entry["term"])
+            definition_prefix = f"**{term_entry['term']}**: {first_sentence}\n\n---\n\n"
+            log.info("data_query: will prepend term intro for %s", term_entry["term"])
 
-    yield _sse("progress", {"message": "Retrieving schema…"})
+    yield _sse("progress", {"message": "Retrieving schema…", "step": "schema"})
     schema_state = await asyncio.to_thread(retrieve_schema, {
         "question": message, "history": history_text, "language": language,
         "retrieved_schema": "", "allowed_tables": [], "sql": "",
@@ -2040,8 +3328,14 @@ async def run_db_agent_stream(
         "retry_count": 0, "sql_error": "", "rows": [], "cols": [],
         "answer": "", "chart_specs": [],
     })
+    allowed_tables = schema_state.get("allowed_tables", [])
+    yield _sse("progress", {
+        "message": f"Found {len(allowed_tables)} relevant table(s)",
+        "step": "schema", "status": "done",
+        "tables": allowed_tables,
+    })
 
-    yield _sse("progress", {"message": "Writing SQL…"})
+    yield _sse("progress", {"message": "Writing SQL…", "step": "write_sql"})
     write_node = _make_write_sql_node(llm)
     sql_state = await asyncio.to_thread(write_node, {**schema_state, "question": message,
         "history": history_text, "language": language,
@@ -2055,9 +3349,15 @@ async def run_db_agent_stream(
         "retry_count": 0, "error_history": [], "chart_specs": [], "answer": "",
         **schema_state, **sql_state,
     }
+    draft_sql = (current_state.get("sql") or "").strip()
+    if draft_sql:
+        yield _sse("progress", {
+            "message": "SQL drafted", "step": "write_sql", "status": "done",
+            "sql": draft_sql,
+        })
 
     # Validate + repair loop (synchronous, same as pipeline)
-    yield _sse("progress", {"message": "Validating query…"})
+    yield _sse("progress", {"message": "Validating query…", "step": "validate"})
     for _ in range(_MAX_RETRIES + 2):
         vs = await asyncio.to_thread(validate_syntax, current_state)
         current_state = {**current_state, **vs}
@@ -2068,18 +3368,36 @@ async def run_db_agent_stream(
                 vsem = await asyncio.to_thread(validate_semantic, current_state)
                 current_state = {**current_state, **vsem}
                 if not current_state.get("semantic_error"):
+                    yield _sse("progress", {"message": "Query validated", "step": "validate", "status": "done"})
                     break
         err = _any_validation_error(current_state)
         if not err or current_state.get("retry_count", 0) >= _MAX_RETRIES:
             break
-        yield _sse("progress", {"message": f"Repairing SQL (attempt {current_state.get('retry_count',0)+1})…"})
+        attempt = current_state.get("retry_count", 0) + 1
+        yield _sse("progress", {
+            "message": f"Repairing SQL (attempt {attempt})…",
+            "step": "repair", "attempt": attempt,
+            "error": (err or "")[:200],
+        })
         critique_node = _make_critique_sql_node(llm)
         cr = await asyncio.to_thread(critique_node, current_state)
         current_state = {**current_state, **cr}
+        repaired_sql = (current_state.get("sql") or "").strip()
+        if repaired_sql:
+            yield _sse("progress", {
+                "message": f"SQL repaired (attempt {attempt})",
+                "step": "repair", "status": "done",
+                "sql": repaired_sql,
+            })
 
-    yield _sse("progress", {"message": "Executing query…"})
+    yield _sse("progress", {"message": "Executing query…", "step": "execute"})
     exec_state = await asyncio.to_thread(execute_sql, current_state)
     current_state = {**current_state, **exec_state}
+    exec_rows = len(current_state.get("rows", []))
+    yield _sse("progress", {
+        "message": f"Query returned {exec_rows} row(s)",
+        "step": "execute", "status": "done",
+    })
 
     rows = current_state.get("rows", [])
     cols = current_state.get("cols", [])
@@ -2087,21 +3405,33 @@ async def run_db_agent_stream(
     # Build chart spec and facts
     chart_spec = _build_chart_spec(cols, rows, message) if rows else None
     facts      = _compute_data_facts(cols, rows) if rows else ""
-    source     = _source_context(current_state.get("sql",""), rows)
+    source     = _source_context(current_state.get("sql",""), rows, cols)
     lang_instr = _LANG_INSTRUCTIONS.get(language, _LANG_INSTRUCTIONS["en"])
     fmt_system = _FMT_SYSTEM.format(language_instruction=lang_instr)
     table      = _build_ascii_table(rows, cols) if rows else ""
 
-    yield _sse("progress", {"message": "Formatting answer…"})
+    snapshot_label = current_state.get("snapshot_label", "")
+    snapshot_ctx   = f"Database snapshot: {snapshot_label}\n" if snapshot_label else ""
+    col_ctx        = f"Columns in result: {', '.join(cols)}\n" if cols else ""
+    quarterly_ctx  = _detect_quarterly_availability(rows, cols)
+    quarterly_line = f"{quarterly_ctx}\n" if quarterly_ctx else ""
+
+    yield _sse("progress", {"message": "Formatting answer…", "step": "format"})
 
     full_answer = ""
+    # Stream the definition prefix first so the user sees it immediately
+    if definition_prefix:
+        yield _sse("token", {"text": definition_prefix})
     try:
         fmt_messages = [
             SystemMessage(content=fmt_system),
             HumanMessage(content=(
                 f"User question: {message}\n\n"
+                f"{col_ctx}"
+                f"{quarterly_line}"
+                f"{snapshot_ctx}"
                 f"{facts}\n\n"
-                f"Query source (for the **Source** line): {source}\n\n"
+                f"Query source (for the **Data Source** line): {source}\n\n"
                 f"Result ({len(rows)} row(s), first {_LLM_TABLE_ROW_CAP} shown):\n{table}"
             )),
         ]
@@ -2115,11 +3445,32 @@ async def run_db_agent_stream(
         full_answer = fallback_text
         yield _sse("token", {"text": fallback_text})
 
-    full_answer = (definition_prefix + "\n\n---\n\n" + full_answer) if definition_prefix else full_answer
-    history_turns.append(f"Q: {message}\nA: {full_answer}")
+    full_answer = (definition_prefix + full_answer) if definition_prefix else full_answer
+    sql = current_state.get("sql", "")
+    tables_queried = sorted(_referenced_tables(sql)) if sql else []
+    row_count = len(rows)
+
+    # Store in semantic cache if pipeline succeeded
+    error_phrases = ("unable to generate", "could not", "error", "failed")
+    pipeline_ok = bool(sql) and not any(p in full_answer.lower() for p in error_phrases)
+    if pipeline_ok:
+        semantic_cache.set(message, sql, rows, cols, full_answer, embedding=q_embedding)
+
+    history_entry = f"User: {message}"
+    if sql:
+        history_entry += f"\nSQL:\n{sql}"
+    history_entry += f"\nAnswer: {full_answer[:300]}"
+    history_turns.append(history_entry)
     _conversation_history[thread_id] = history_turns
     inference_time = round(time.monotonic() - t_start, 2)
-    yield _sse("done", {"inference_time": inference_time, "charts": [chart_spec] if chart_spec else []})
+    yield _sse("done", {
+        "inference_time": inference_time,
+        "charts": [chart_spec] if chart_spec else [],
+        "sql": sql,
+        "tables_queried": tables_queried,
+        "row_count": row_count,
+        "cache_hit": False,
+    })
 
 
 async def run_agent(
@@ -2145,8 +3496,74 @@ async def run_agent(
 
     inference_time = round(time.monotonic() - t_start, 2)
     messages = result.get("messages", [])
-    for msg in reversed(messages):
-        if hasattr(msg, "content") and msg.content and not getattr(msg, "tool_calls", None):
-            return {"answer": msg.content, "inference_time": inference_time}
 
-    return {"answer": "I was unable to generate a response. Please try again.", "inference_time": inference_time}
+    chart_specs = []
+    for msg in messages:
+        if getattr(msg, "name", None) == "generate_chart_spec":
+            try:
+                chart_specs.append(json.loads(msg.content))
+            except Exception:
+                pass
+
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and msg.content and not getattr(msg, "tool_calls", None):
+            return {"answer": msg.content, "inference_time": inference_time, "charts": chart_specs}
+
+    return {"answer": "I was unable to generate a response. Please try again.", "inference_time": inference_time, "charts": chart_specs}
+
+
+async def run_agent_stream(
+    session_id: str,
+    parsed_data: dict,
+    message: str,
+    conversation_id: str = "default",
+    model: str | None = None,
+    language: str = "en",
+):
+    """
+    Async generator that yields SSE-formatted strings for streaming file-session chat.
+    Events: progress, token, done, error
+    """
+    import json as _j
+
+    def _sse(event, data):
+        return f"event: {event}\ndata: {_j.dumps(data, ensure_ascii=False)}\n\n"
+
+    t_start = time.monotonic()
+    try:
+        graph = get_or_create_graph(session_id, parsed_data, model=model)
+        thread_id = f"{session_id}:{conversation_id}"
+        config = {"configurable": {"thread_id": thread_id}}
+
+        lang_instr = _LANG_INSTRUCTIONS.get(language, _LANG_INSTRUCTIONS["en"])
+        augmented = f"[{lang_instr}]\n{message}"
+
+        chart_specs = []
+        final_answer = ""
+
+        async for delta in graph.astream(
+            {"messages": [HumanMessage(content=augmented)]},
+            config=config,
+            stream_mode="updates",
+        ):
+            for node_msgs in delta.values():
+                msgs = node_msgs.get("messages", []) if isinstance(node_msgs, dict) else []
+                for msg in msgs:
+                    if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                        for tc in msg.tool_calls:
+                            tool_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                            yield _sse("progress", {"message": f"Calling {tool_name.replace('_', ' ')}…"})
+                    elif getattr(msg, "name", None) == "generate_chart_spec":
+                        try:
+                            chart_specs.append(_j.loads(msg.content))
+                        except Exception:
+                            pass
+                    elif isinstance(msg, AIMessage) and msg.content and not getattr(msg, "tool_calls", None):
+                        final_answer = msg.content
+
+        yield _sse("token", {"text": final_answer})
+        inference_time = round(time.monotonic() - t_start, 2)
+        yield _sse("done", {"inference_time": inference_time, "charts": chart_specs})
+    except Exception as exc:
+        log.error("run_agent_stream failed: %s", exc)
+        yield _sse("error", {"detail": str(exc)})
