@@ -1276,13 +1276,34 @@ YEAR-ON-YEAR (YoY) COMPARISON — for questions about growth, YoY, vs last year,
 OPEX QUERIES — for questions about operating expenses, charges, coûts opérationnels:
   Category: 'Opex Consolidés'. Same JOIN path as revenue.
 
-  ⚠ MANDATORY RULE: NEVER return a single-row total for an OPEX question.
-    ANY OPEX question (single month, full year, trend) MUST GROUP BY ft.name to show the
-    breakdown by OpEx type. A single SUM with no GROUP BY is FORBIDDEN for OpEx.
-    ✗ WRONG: SELECT SUM(fmd.real_value) AS opex_may_2024 FROM fmd ... (single total — FORBIDDEN)
-    ✓ CORRECT: GROUP BY ft.name to return one row per OpEx type.
+  ⚠ QUERY SELECTION RULE — choose the pattern based on what the question asks:
+    • "monthly trend", "month by month", "evolution mensuelle", "par mois" → use MONTHLY TREND (GROUP BY month)
+    • "breakdown", "by type", "which categories", "par type", "total for a year" → use BREAKDOWN BY TYPE (GROUP BY ft.name)
+    • "single month" (e.g. "opex in March 2025") → use SINGLE MONTH BREAKDOWN (GROUP BY ft.name + MONTH filter)
+    ✗ NEVER use a single ungrouped SUM with no GROUP BY — always group by something.
+    ✗ NEVER apply GROUP BY ft.name to a monthly trend question — it produces wrong results.
 
-  ✓ OpEx breakdown by type for a year:
+  ✓ Monthly OpEx trend — use for "monthly trend", "month by month", "evolution mensuelle" (e.g. "opex 2024 monthly trend"):
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT EXTRACT(MONTH FROM fmd.date)::int        AS month,
+           ROUND(SUM(fmd.real_value)::numeric, 0)         AS total_opex_m_fcfa,
+           ROUND(SUM(fmd.budget_value)::numeric, 0)        AS budget_m_fcfa,
+           ROUND(SUM(fmd.last_year_real_value)::numeric, 0) AS prior_year_m_fcfa
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name = 'Opex Consolidés'
+      AND EXTRACT(YEAR FROM fmd.date) = 2024
+      AND fmd.real_value IS NOT NULL
+    GROUP BY EXTRACT(MONTH FROM fmd.date)
+    ORDER BY month;
+
+  ✓ OpEx breakdown by type for a year — use for "breakdown", "by category", "which types", or "total opex for the year":
     WITH fmd AS (
       SELECT DISTINCT ON (financial_metric_id, date) *
       FROM financial_metrics_data
@@ -1298,7 +1319,7 @@ OPEX QUERIES — for questions about operating expenses, charges, coûts opérat
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
     WHERE fc.name = 'Opex Consolidés'
-      AND EXTRACT(YEAR FROM fmd.date) = 2025
+      AND EXTRACT(YEAR FROM fmd.date) = 2024
       AND fmd.real_value IS NOT NULL
     GROUP BY ft.name ORDER BY actual_m_fcfa DESC;
 
@@ -1345,23 +1366,6 @@ OPEX QUERIES — for questions about operating expenses, charges, coûts opérat
       AND fmd.real_value IS NOT NULL
     GROUP BY ft.name
     ORDER BY actual_m_fcfa DESC;
-
-  ✓ Monthly OpEx trend:
-    WITH fmd AS (
-      SELECT DISTINCT ON (financial_metric_id, date) *
-      FROM financial_metrics_data
-      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
-    )
-    SELECT EXTRACT(MONTH FROM fmd.date)::int AS month,
-           ROUND(SUM(fmd.real_value)::numeric, 0) AS total_opex
-    FROM fmd
-    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
-    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
-    JOIN financial_categories fc ON fc.id = ft.financial_category_id
-    WHERE fc.name = 'Opex Consolidés'
-      AND EXTRACT(YEAR FROM fmd.date) = 2025
-      AND fmd.real_value IS NOT NULL
-    GROUP BY EXTRACT(MONTH FROM fmd.date) ORDER BY month;
 
 BFR / WORKING CAPITAL QUERIES — for questions about BFR, "Besoin en Fonds de Roulement", working capital,
   "variation de BFR", "BFR opérationnel", or "sub-components of BFR":
@@ -2096,11 +2100,14 @@ You MUST copy numbers from DATA FACTS verbatim into your Summary and Key Insight
 Month labels are always full names (January … December) — never write "Month N".
 Do NOT re-derive totals, peaks, shares, or trend direction from the table.
 
-OPEX ANALYSIS RULE — when the result contains an opex_type column (breakdown by OpEx type):
-  The Summary MUST state the grand total of actual_m_fcfa across all types, then name the largest cost category.
-  The Analysis must discuss cost structure: which types dominate, budget adherence per type, YoY change if available.
+OPEX ANALYSIS RULE:
+  • When the result contains a `month` column (monthly trend): state the annual total, identify the peak and trough months,
+    comment on seasonality. If budget_m_fcfa is present, note the worst budget miss month.
+  • When the result contains an `opex_type` column (breakdown by type): state the grand total of actual_m_fcfa
+    across all types, then name the largest cost category. Discuss cost structure, budget adherence per type,
+    and YoY change if available.
   Never state "no comparative data available" if a prior_year_m_fcfa column is present in the result.
-  Key Insights must include one bullet on the largest OpEx driver and one on budget vs actual.
+  Key Insights must include one bullet on the largest OpEx driver and one on budget vs actual (if those columns exist).
 
 OUTPUT FORMAT — use EXACTLY this structure (no deviations):
 
