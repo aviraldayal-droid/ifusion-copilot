@@ -1277,11 +1277,19 @@ OPEX QUERIES — for questions about operating expenses, charges, coûts opérat
   Category: 'Opex Consolidés'. Same JOIN path as revenue.
 
   ⚠ QUERY SELECTION RULE — choose the pattern based on what the question asks:
-    • "monthly trend", "month by month", "evolution mensuelle", "par mois" → use MONTHLY TREND (GROUP BY month)
-    • "breakdown", "by type", "which categories", "par type", "total for a year" → use BREAKDOWN BY TYPE (GROUP BY ft.name)
-    • "single month" (e.g. "opex in March 2025") → use SINGLE MONTH BREAKDOWN (GROUP BY ft.name + MONTH filter)
-    ✗ NEVER use a single ungrouped SUM with no GROUP BY — always group by something.
+    • Contains "monthly trend", "month by month", "evolution mensuelle", "par mois"
+      AND no specific month named → MONTHLY TREND (GROUP BY month, no ft.name)
+    • Contains "breakdown", "by type", "by category", "par type", "which types"
+      AND a specific month named (e.g. "May 2024", "March", "Q1") → SINGLE MONTH BREAKDOWN
+      (GROUP BY ft.name WITH month + year filter) — returns one row per opex type
+    • Contains "breakdown", "by type", "which categories" AND no specific month
+      → YEARLY BREAKDOWN (GROUP BY ft.name, full year) — returns one row per opex type
+    • Simple "what is opex for [month]?" with no "breakdown" keyword
+      → also use SINGLE MONTH BREAKDOWN (GROUP BY ft.name + MONTH filter)
+    ✗ NEVER return a single-row ungrouped total — ALWAYS group by ft.name or by month.
     ✗ NEVER apply GROUP BY ft.name to a monthly trend question — it produces wrong results.
+    ✓ A breakdown query MUST return multiple rows (3–8 rows, one per opex type).
+      If your query has no GROUP BY ft.name, it is wrong for any breakdown question.
 
   ✓ Monthly OpEx trend — use for "monthly trend", "month by month", "evolution mensuelle" (e.g. "opex 2024 monthly trend"):
     WITH fmd AS (
@@ -1345,7 +1353,8 @@ OPEX QUERIES — for questions about operating expenses, charges, coûts opérat
     ORDER BY actual DESC
     LIMIT 5;
 
-  ✓ OpEx breakdown by type for a SINGLE MONTH (e.g. "what was opex for March 2025?"):
+  ✓ OpEx breakdown by type for a SINGLE MONTH — use for "breakdown for May 2024", "opex May 2024",
+    "what was opex for March 2025", or any question naming a specific month (returns 3–8 rows, one per type):
     WITH fmd AS (
       SELECT DISTINCT ON (financial_metric_id, date) *
       FROM financial_metrics_data
@@ -1361,8 +1370,8 @@ OPEX QUERIES — for questions about operating expenses, charges, coûts opérat
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
     WHERE fc.name = 'Opex Consolidés'
-      AND EXTRACT(YEAR FROM fmd.date) = 2025
-      AND EXTRACT(MONTH FROM fmd.date) = 3
+      AND EXTRACT(YEAR FROM fmd.date) = 2024
+      AND EXTRACT(MONTH FROM fmd.date) = 5
       AND fmd.real_value IS NOT NULL
     GROUP BY ft.name
     ORDER BY actual_m_fcfa DESC;
