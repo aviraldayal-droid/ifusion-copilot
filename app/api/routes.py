@@ -355,9 +355,17 @@ async def list_models():
 @router.post("/settings")
 async def update_settings(body: dict):
     """Update runtime settings in-memory. Changes apply immediately to all new requests."""
+    import logging
+    _log = logging.getLogger("tbg.settings")
     from app.config.settings import settings
     if "ollama_api_key" in body:
-        settings.OLLAMA_API_KEY = body["ollama_api_key"] or ""
+        key = body["ollama_api_key"] or ""
+        settings.OLLAMA_API_KEY = key
+        if key:
+            masked = key[:8] + "***" if len(key) > 8 else "***"
+            _log.info("OLLAMA_API_KEY updated via frontend — key: %s", masked)
+        else:
+            _log.info("OLLAMA_API_KEY cleared via frontend — switching to LOCAL OLLAMA")
     return {"status": "ok"}
 
 

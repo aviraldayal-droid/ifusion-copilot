@@ -193,7 +193,8 @@ def _make_llm(model: str | None = None) -> OllamaLLM:
     if settings.is_ollama_cloud:
         headers = {"Authorization": f"Bearer {settings.OLLAMA_API_KEY}"}
         client = Client(host=settings.OLLAMA_BASE_URL, headers=headers, timeout=_OLLAMA_TIMEOUT)
-        log.info("LLM initialized — API: OLLAMA CLOUD | model: %s | timeout: %ds", resolved, _OLLAMA_TIMEOUT)
+        masked = settings.OLLAMA_API_KEY[:8] + "***" if len(settings.OLLAMA_API_KEY) > 8 else "***"
+        log.info("LLM initialized — API: OLLAMA CLOUD | key: %s | model: %s | timeout: %ds", masked, resolved, _OLLAMA_TIMEOUT)
     else:
         client = Client(host=settings.OLLAMA_BASE_URL, timeout=_OLLAMA_TIMEOUT)
         log.info("LLM initialized — API: LOCAL OLLAMA | model: %s | base_url: %s", resolved, settings.OLLAMA_BASE_URL)
