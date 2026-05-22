@@ -2926,9 +2926,9 @@ def _get_db_pipeline(model: str | None = None) -> object:
 
 _INTENT_CLASSIFIER_PROMPT = """\
 Classify the user's question as exactly one of these five labels:
-  definition   — ONLY asking for an explanation or definition of a financial term
-  data_query   — asking for data, numbers, trends, or analysis from the database
-  both         — asking BOTH a definition AND data in the same message
+  definition   — ONLY asking for an explanation or definition of a financial term, with no request for data
+  data_query   — asking for data, numbers, trends, comparisons, or analysis from the database
+  both         — EXPLICITLY asking for a definition AND data in the SAME sentence (rare)
   out_of_scope — asking about something the financial database cannot answer:
                  external regulatory decrees, tax law amendments, court rulings,
                  government policy documents, news events, competitor information,
@@ -2938,10 +2938,24 @@ Classify the user's question as exactly one of these five labels:
 
 The question may be in English OR French. Classify based on meaning, not language.
 
+KEY RULES:
+- Any question containing a YEAR (2024, 2025, etc.) is data_query, never definition.
+- Any question asking for a comparison, trend, breakdown, or "vs" is data_query.
+- "What is X for 2025?" → data_query (the year makes it a data request)
+- "What is X?" with NO year or data context → definition
+- Use "both" ONLY when the question explicitly says "what is X AND show me data" in the same sentence.
+  Do NOT use "both" just because a question mentions a financial term.
+
 English examples:
   "What is CAPEX?"                                          → definition
+  "What is CapEx vs budget for 2025?"                       → data_query
+  "What is CapEx vs budget values for 2025?"                → data_query
+  "capex vs budget for 2025"                                → data_query
+  "capex vs budget variance for 2025"                       → data_query
+  "What was CapEx in 2024?"                                 → data_query
   "Show me monthly revenue for 2025"                        → data_query
   "What is EBITDA and what was it in 2024?"                 → both
+  "Define OPEX and show me last year's numbers"             → both
   "Hello, how are you?"                                     → other
   "Which decree triggered the variance in Redevances?"      → out_of_scope
   "What tax law caused the OPEX increase?"                  → out_of_scope
@@ -2950,8 +2964,10 @@ English examples:
 
 French examples:
   "Qu'est-ce que l'EBITDA ?"                                → definition
+  "Quel est l'EBITDA pour 2024 ?"                           → data_query
   "Montre-moi l'évolution du chiffre d'affaires"            → data_query
-  "Qu'est-ce que le churn et quel est son taux ?"           → both
+  "Capex vs budget 2025"                                    → data_query
+  "Qu'est-ce que le churn et quel est son taux en 2024 ?"   → both
   "Quel décret a causé la variance des redevances ?"        → out_of_scope
   "Quelle ordonnance fiscale a modifié les charges ?"       → out_of_scope
   "Bonjour, comment ça va ?"                                → other
