@@ -50,6 +50,11 @@ videos/
 reference_docs/
 schema_files/
 
+# ── Local SQLite store (conversation history) ─────────────────────────────────
+copilot.db
+copilot.db-wal
+copilot.db-shm
+
 # ── Database dumps ────────────────────────────────────────────────────────────
 *.sql
 *.dump
