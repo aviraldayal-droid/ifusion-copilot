@@ -781,17 +781,38 @@ CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by mont
     WHERE cd25.year = 2025
     GROUP BY cd25.month ORDER BY cd25.month;
 
-  ✓ CAPEX breakdown by type as percentage:
-    SELECT
-      SUM(cd.equipment)         AS equipment_spend,
-      SUM(cd.services)          AS services_spend,
-      SUM(cd.additional_costs)  AS additional_costs_spend,
-      ROUND(SUM(cd.equipment) * 100.0
-            / NULLIF(SUM(cd.equipment + cd.services + cd.additional_costs), 0)::numeric, 2) AS equipment_pct,
-      ROUND(SUM(cd.services)  * 100.0
-            / NULLIF(SUM(cd.equipment + cd.services + cd.additional_costs), 0)::numeric, 2) AS services_pct
+  ✓ CAPEX percentage by category/direction — use for "percentage by category", "share per direction",
+    "what % was spent on each category" (NOTE: "category" in CapEx = cp.direction_name, NOT financial_categories):
+    SELECT cp.direction_name,
+           SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)) AS total_capex,
+           ROUND(
+             SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)) * 100.0
+             / NULLIF(SUM(SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)))
+                      OVER (), 0),
+             2
+           ) AS share_pct
     FROM capex_data cd
-    WHERE cd.year = 2025;
+    JOIN capex_projects cp ON cp.id = cd.capex_projects_id
+    WHERE cd.year = 2024
+    GROUP BY cp.direction_name
+    ORDER BY total_capex DESC;
+
+  ✓ CAPEX breakdown by cost type as percentage (equipment vs services vs additional_costs):
+    SELECT
+      SUM(COALESCE(cd.equipment,0))        AS equipment_spend,
+      SUM(COALESCE(cd.services,0))         AS services_spend,
+      SUM(COALESCE(cd.additional_costs,0)) AS additional_costs_spend,
+      ROUND(SUM(COALESCE(cd.equipment,0)) * 100.0
+            / NULLIF(SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)), 0), 2)
+            AS equipment_pct,
+      ROUND(SUM(COALESCE(cd.services,0)) * 100.0
+            / NULLIF(SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)), 0), 2)
+            AS services_pct,
+      ROUND(SUM(COALESCE(cd.additional_costs,0)) * 100.0
+            / NULLIF(SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)), 0), 2)
+            AS additional_costs_pct
+    FROM capex_data cd
+    WHERE cd.year = 2024;
 
 CASH FLOW HIERARCHY — use ONLY for questions about flux de trésorerie / treasury / liquidity:
   realised_cashflow → cashflow_sections → cashflow_categories → cashflow_subcategories
