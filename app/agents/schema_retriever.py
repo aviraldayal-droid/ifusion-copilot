@@ -133,8 +133,13 @@ _DOMAIN_HINTS: dict[str, list[str]] = {
     "frais":          _FMT,
     "exploitation":   _FMT,
     # ── Capex ─────────────────────────────────────────────────────────────────
-    "capex":              ["capex_data", "capex_projects"],
-    "investissement":     ["capex_data", "capex_projects"],
+    # Generic capex keywords → both financial_metrics_data (for totals/trends/budget)
+    # AND capex_data/capex_projects (for supplier/project breakdown). The LLM picks
+    # the right table based on the question per the CAPEX QUERIES vs CAPEX HIERARCHY
+    # sections in the prompt.
+    "capex":              _FMT + ["capex_data", "capex_projects"],
+    "investissement":     _FMT + ["capex_data", "capex_projects"],
+    # Supplier/project-only keywords stay narrow.
     "additional_costs":   ["capex_data", "capex_projects"],
     "additional costs":   ["capex_data", "capex_projects"],
     "cout supplementaire":["capex_data", "capex_projects"],
