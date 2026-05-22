@@ -1051,10 +1051,44 @@ MARGINS / PROFITABILITY QUERIES:
       AND EXTRACT(YEAR FROM e.date) = 2025
     ORDER BY e.date;
 
+  ✓ EBITDA margin for a quarter (e.g. "EBITDA margin Q1 2025", "Q2 2024 EBITDA margin"):
+    — uses financial_metrics_data only (no revenue_raw_data join needed)
+    — 'Mobile' is total mobile revenue (CA) stored in P&L conso category
+    — Q1 = months 1–3, Q2 = 4–6, Q3 = 7–9, Q4 = 10–12
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    ),
+    q_data AS (
+      SELECT fm.name AS metric,
+             SUM(fmd.real_value) AS total
+      FROM fmd
+      JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+      JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+      JOIN financial_categories fc ON fc.id = ft.financial_category_id
+      WHERE fc.name = 'P&L conso'
+        AND fm.name IN ('EBITDA', 'Mobile')
+        AND EXTRACT(YEAR FROM fmd.date) = 2025
+        AND EXTRACT(MONTH FROM fmd.date) BETWEEN 1 AND 3
+        AND fmd.real_value IS NOT NULL
+      GROUP BY fm.name
+    )
+    SELECT
+      ROUND(MAX(CASE WHEN metric = 'EBITDA' THEN total END)::numeric, 0)  AS ebitda_m_fcfa,
+      ROUND(MAX(CASE WHEN metric = 'Mobile' THEN total END)::numeric, 0)  AS ca_mobile_m_fcfa,
+      ROUND(
+        MAX(CASE WHEN metric = 'EBITDA' THEN total END) * 100.0
+        / NULLIF(MAX(CASE WHEN metric = 'Mobile' THEN total END), 0),
+        2
+      )                                                                    AS ebitda_margin_pct
+    FROM q_data;
+
   JOIN KEY: financial_metrics_data → revenue_raw_data (for CA Global):
     DATE_TRUNC('month', fmd.date) = DATE_TRUNC('month', rrd.date) — aggregate rrd by month first.
     ALWAYS divide SUM(revenue_raw_data.ca_global) by 1,000,000 to convert to millions before dividing.
   Use this join whenever computing a ratio of a financial_metrics_data metric against CA Global.
+  ⚠ If revenue_raw_data has no data for the requested period, use the quarterly example above instead.
 
 CHURN RATE QUERIES — for questions about churn, taux de churn, attrition, résiliation:
   ⚠ There is NO metric called 'churn' or 'taux de churn' directly in financial_metric.
