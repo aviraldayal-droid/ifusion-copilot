@@ -429,6 +429,7 @@ async def db_chat(
             "tables":         result.get("tables_queried"),
             "inference_time": result.get("inference_time"),
             "cache_hit":      result.get("cache_hit"),
+            "charts":         charts_raw,
         }
         await _asyncio.to_thread(save_message, conv_id, "bot", response_text, bot_meta)
         await _asyncio.to_thread(touch_conversation, conv_id)
@@ -549,6 +550,7 @@ async def db_chat_stream(
                             "tables":         done_payload.get("tables_queried"),
                             "inference_time": done_payload.get("inference_time"),
                             "cache_hit":      done_payload.get("cache_hit"),
+                            "charts":         done_payload.get("charts", []),
                         }
                         try:
                             await _asyncio.to_thread(save_message, conv_id, "bot", full_answer, bot_meta)

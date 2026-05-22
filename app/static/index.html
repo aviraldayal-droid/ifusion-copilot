@@ -2257,7 +2257,8 @@
           appendMsg('user', m.content);
         } else {
           appendMsg(
-            'bot', m.content, false, [],
+            'bot', m.content, false,
+            meta.charts || [],
             meta.inference_time || null,
             { sql: meta.sql, tables_queried: meta.tables, row_count: null }
           );

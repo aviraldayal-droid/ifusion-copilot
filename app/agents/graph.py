@@ -666,8 +666,16 @@ CAPEX QUERIES — for questions about total CapEx, CapEx vs budget, CapEx trends
   Category: 'Capex Consolidés'. Same dedup CTE + JOIN path as OPEX/EBITDA (financial_metrics_data).
 
   ⚠ TABLE SELECTION RULE:
-    • "total CapEx", "CapEx vs budget", "CapEx trend", "CapEx monthly", "CapEx YoY", "CapEx by type"
+    • "total CapEx", "CapEx vs budget", "CapEx trend", "CapEx monthly", "CapEx YoY", "CapEx by type",
+      "top N CapEx drivers vs budget", "CapEx drivers"
       → use financial_metrics_data (has real_value, budget_value, last_year_real_value)
+      ⚠ DRIVER LIMIT RULE: 'Capex Consolidés' has EXACTLY 3 financial types (Réseau,
+        Commercial et Marketing, Administratif et Financier). NEVER add LIMIT to driver/type
+        queries — you will always get at most 3 rows. If user asks "top 5 drivers" but only 3
+        types exist, return all 3 without LIMIT and note in the answer that only 3 exist.
+    • "top N CapEx projects", "biggest projects", "largest projects by spend"
+      → use capex_data JOIN capex_projects GROUP BY project_title LIMIT N
+        (no budget_value available at project level — show actual spend only)
     • "CapEx by supplier", "CapEx by project", "CapEx by direction", "which supplier"
       → use capex_data JOIN capex_projects (see CAPEX HIERARCHY below)
 
@@ -709,7 +717,8 @@ CAPEX QUERIES — for questions about total CapEx, CapEx vs budget, CapEx trends
     GROUP BY EXTRACT(MONTH FROM fmd.date)
     ORDER BY month;
 
-  ✓ CapEx breakdown by type for a year (e.g. "CapEx breakdown 2024", "CapEx by category"):
+  ✓ CapEx breakdown by type / top CapEx drivers vs budget (e.g. "CapEx breakdown 2024", "CapEx by category",
+    "top 5 CapEx drivers 2024", "CapEx drivers vs budget") — returns ALL types (max 3), no LIMIT:
     WITH fmd AS (
       SELECT DISTINCT ON (financial_metric_id, date) *
       FROM financial_metrics_data
@@ -770,6 +779,17 @@ CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by dire
     WHERE cd.year = 2025
     GROUP BY cp.project_title, cp.supplier_name, cp.direction_name
     ORDER BY total_cost DESC;
+
+  ✓ Top N CapEx projects by spend (e.g. "top 5 CapEx projects 2024", "biggest CapEx projects"):
+    SELECT cp.project_title, cp.supplier_name, cp.direction_name,
+           SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)) AS total_capex_m_fcfa
+    FROM capex_data cd
+    JOIN capex_projects cp ON cp.id = cd.capex_projects_id
+    WHERE cd.year = 2024
+    GROUP BY cp.project_title, cp.supplier_name, cp.direction_name
+    ORDER BY total_capex_m_fcfa DESC
+    LIMIT 5;
+    ⚠ No budget_value at project level — show actual spend + direction only. Do NOT add budget column.
 
   ⚠ CAPEX PROJECT GROUPING RULE — CRITICAL:
     When grouping by project, ALWAYS use (cp.project_title, cp.supplier_name, cp.direction_name).
@@ -2276,6 +2296,8 @@ STRICT RULES:
   If no variance_pct / growth_pct / share_pct column exists in the result, do NOT mention percentages
   in Summary or Key Insights. State absolute differences in M FCFA instead.
 - If a cell shows "(null)" → write "no data available". NEVER write "None" or "null".
+- If the question asked for "top N" but fewer than N rows are in the result, note in the Summary
+  how many actually exist (e.g. "Only 3 CapEx driver categories exist in the database").
 - Do NOT start with "I'm sorry", "Based on", "The query returned", or "Here is".
 - {language_instruction}
 """
