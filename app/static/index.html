@@ -344,6 +344,31 @@
     }
     .topbar-icon-btn:hover { background: var(--surface2); color: var(--accent); }
 
+    /* Settings dropdown */
+    .settings-wrap { position: relative; }
+    .settings-dropdown {
+      display: none; position: absolute; top: calc(100% + 8px); right: 0;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; box-shadow: var(--shadow-md, 0 8px 24px rgba(0,0,0,0.12));
+      padding: 14px 16px; width: 280px; z-index: 200;
+    }
+    .settings-dropdown.open { display: block; }
+    .settings-dropdown label { font-size: 0.72rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; display: block; margin-bottom: 5px; }
+    .settings-key-row { display: flex; gap: 6px; }
+    .settings-key-input {
+      flex: 1; height: 32px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 0.82rem; padding: 0 10px;
+      font-family: monospace;
+    }
+    .settings-key-input:focus { outline: none; border-color: var(--accent); }
+    .settings-save-btn {
+      height: 32px; padding: 0 12px; border-radius: 8px; border: none;
+      background: var(--accent); color: #fff; font-size: 0.8rem; font-weight: 600;
+      cursor: pointer; white-space: nowrap;
+    }
+    .settings-save-btn:hover { opacity: 0.88; }
+    .settings-status { font-size: 0.75rem; margin-top: 7px; color: var(--muted); min-height: 16px; }
+
     /* Alert panel */
     .alert-panel {
       margin: 7px 14px 0; border: 1px solid var(--border-mid);
@@ -1653,6 +1678,19 @@
         <option value="fr">FR</option>
       </select>
       <button class="topbar-icon-btn" id="theme-toggle-top" onclick="toggleTheme()" title="Toggle theme">☀️</button>
+      <div class="settings-wrap">
+        <button class="topbar-icon-btn" onclick="toggleSettingsDropdown()" title="Settings">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <div class="settings-dropdown" id="settings-dropdown">
+          <label>Ollama Cloud API Key</label>
+          <div class="settings-key-row">
+            <input type="password" id="ollama-api-key-input" class="settings-key-input" placeholder="sk-…" autocomplete="off"/>
+            <button class="settings-save-btn" onclick="saveOllamaApiKey()">Save</button>
+          </div>
+          <div class="settings-status" id="settings-status"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -2562,6 +2600,42 @@
   loadModels();
 
   // ── Theme ────────────────────────────────────────────
+  // ── Settings dropdown ─────────────────────────────────
+  function toggleSettingsDropdown() {
+    const d = document.getElementById('settings-dropdown');
+    d.classList.toggle('open');
+    if (d.classList.contains('open')) {
+      document.getElementById('ollama-api-key-input').focus();
+      document.getElementById('settings-status').textContent = '';
+    }
+  }
+
+  document.addEventListener('click', e => {
+    const wrap = e.target.closest('.settings-wrap');
+    if (!wrap) document.getElementById('settings-dropdown')?.classList.remove('open');
+  });
+
+  async function saveOllamaApiKey() {
+    const key   = document.getElementById('ollama-api-key-input').value.trim();
+    const status = document.getElementById('settings-status');
+    status.textContent = 'Saving…';
+    try {
+      const r = await fetch(`${API}/api/v1/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ ollama_api_key: key }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      status.style.color = 'var(--accent)';
+      status.textContent = key ? 'API key saved ✓' : 'API key cleared ✓';
+      document.getElementById('ollama-api-key-input').value = '';
+      setTimeout(() => document.getElementById('settings-dropdown')?.classList.remove('open'), 1200);
+    } catch (e) {
+      status.style.color = '#ef4444';
+      status.textContent = 'Failed: ' + e.message;
+    }
+  }
+
   function toggleTheme() {
     isDark = !isDark;
     document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
