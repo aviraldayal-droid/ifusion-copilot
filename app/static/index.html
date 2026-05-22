@@ -1916,7 +1916,14 @@
 
 <script>
   const API = '';
-  let conversationId = crypto.randomUUID();
+  function _uuid() {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return _uuid();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0;
+      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+  }
+  let conversationId = _uuid();
   let activeSessionId = sessionStorage.getItem('sessionId');
   let activeSessionFiles = [];
   const _chartInstances = {};
@@ -2197,6 +2204,7 @@
       _setAuth(_authToken, _authUser);
       _updateUserUI();
       await loadConversationsFromApi();
+      checkHealth();
     } catch (_) {
       _setAuth(null, null); showAuthModal();
     }
@@ -2649,7 +2657,7 @@
 
   // ── New conversation ──────────────────────────────────
   function newConversation() {
-    conversationId    = crypto.randomUUID();
+    conversationId    = _uuid();
     activeConvSession = null;
     _activeConvId     = null;
     _reportSections   = [];
@@ -3911,7 +3919,7 @@
       _edaCurrentData = data;
       _edaSessionId   = data.session_id || null;
       _edaIsTbg       = !!data.is_tbg;
-      _edaChatConvId  = crypto.randomUUID();
+      _edaChatConvId  = _uuid();
       _renderEdaReport(data);
     } catch (err) {
       document.getElementById('eda-loading').style.display = 'none';
