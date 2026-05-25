@@ -2020,10 +2020,10 @@
     <div class="scope-bar" id="scope-bar">
       <span class="scope-bar-label">Scope</span>
       <select class="scope-select" id="scope-sheet" onchange="onScopeSheetChange()">
-        <option value="">📋 All sheets</option>
+        <option value="">All sheets</option>
       </select>
       <select class="scope-select" id="scope-section" onchange="onScopeSectionChange()" disabled>
-        <option value="">🎯 All sections</option>
+        <option value="">All sections</option>
       </select>
       <span class="scope-help" title="Limit the AI's search to a specific sheet and sub-section. Useful when the same metric name appears in multiple places.">?</span>
       <button class="scope-clear-btn" id="scope-clear-btn" onclick="clearScope()" style="display:none">Clear scope</button>
@@ -2258,7 +2258,7 @@
     <div class="fp-header">
       <div>
         <div class="fp-title">Pin Specific Fields</div>
-        <div class="fp-subtitle">Tabs marked <strong style="color:#f97316">⚠ conflicts</strong> have metrics with the same name in different sub-sections — select the right one so the AI doesn't guess.</div>
+        <div class="fp-subtitle">Tabs marked <strong style="color:#f97316">conflicts</strong> have metrics with the same name in different sub-sections — select the right one so the AI doesn't guess.</div>
       </div>
       <button class="fp-close" onclick="closeFieldPicker()">✕</button>
     </div>
@@ -2869,11 +2869,11 @@
         <h3>Your AI Finance Intelligence</h3>
         <p>Query the Digiwise database in real time — revenue, CAPEX, ARPU, and cash flow. Every answer is validated against live data.</p>
         <div class="welcome-chips">
-          <button class="welcome-chip" onclick="askText('Revenue breakdown by category 2024')"><span class="welcome-chip-icon">📊</span>Revenue 2024</button>
-          <button class="welcome-chip" onclick="askText('Monthly CAPEX trend 2025')"><span class="welcome-chip-icon">📈</span>CAPEX Trend</button>
-          <button class="welcome-chip" onclick="askText('ARPU sortant real vs budget 2025')">📡 ARPU vs Budget</button>
-          <button class="welcome-chip" onclick="askText('Top 5 OPEX drivers in 2024')">📉 Top OPEX drivers</button>
-          <button class="welcome-chip" onclick="askText('Cash flow projection for 2025')">💳 Cash flow 2025</button>
+          <button class="welcome-chip" onclick="askText('Revenue breakdown by category 2024')">Revenue 2024</button>
+          <button class="welcome-chip" onclick="askText('Monthly CAPEX trend 2025')">CAPEX Trend</button>
+          <button class="welcome-chip" onclick="askText('ARPU sortant real vs budget 2025')">ARPU vs Budget</button>
+          <button class="welcome-chip" onclick="askText('Top 5 OPEX drivers in 2024')">Top OPEX drivers</button>
+          <button class="welcome-chip" onclick="askText('Cash flow projection for 2025')">Cash flow 2025</button>
         </div>
       </div>`;
   }
@@ -2888,11 +2888,11 @@
       msgs.innerHTML = `
         <div class="msg-spacer" id="msg-spacer"></div>
         <div class="excel-ready-banner">
-          <div class="excel-ready-title">✓ ${escHtml(fileName)} loaded</div>
+          <div class="excel-ready-title">${escHtml(fileName)} loaded</div>
           <div class="excel-ready-meta">${sheetsCount} sheet${sheetsCount > 1 ? 's' : ''} parsed · ask in English or French · numbers come straight from the workbook</div>
 
           <div class="excel-starter-group">
-            <div class="excel-starter-title">📊 Revenue &amp; Profitability</div>
+            <div class="excel-starter-title">Revenue &amp; Profitability</div>
             <div class="excel-starter-chips">
               <span class="excel-starter-chip" onclick="askText('What is the December 2025 revenue vs budget?')">Revenue vs budget</span>
               <span class="excel-starter-chip" onclick="askText('Show the EBITDA trend for 2025')">EBITDA trend 2025</span>
@@ -2901,7 +2901,7 @@
           </div>
 
           <div class="excel-starter-group">
-            <div class="excel-starter-title">👥 Subscribers (Parc Mobile)</div>
+            <div class="excel-starter-title">Subscribers (Parc Mobile)</div>
             <div class="excel-starter-chips">
               <span class="excel-starter-chip" onclick="askText('Total active mobile subscribers in December 2025')">Active subscribers</span>
               <span class="excel-starter-chip" onclick="askText('How many prepaid activations in December 2025?')">Prepaid activations</span>
@@ -2910,7 +2910,7 @@
           </div>
 
           <div class="excel-starter-group">
-            <div class="excel-starter-title">💰 Costs &amp; CAPEX</div>
+            <div class="excel-starter-title">Costs &amp; CAPEX</div>
             <div class="excel-starter-chips">
               <span class="excel-starter-chip" onclick="askText('Where did we overspend on CAPEX in 2025?')">CAPEX overspend</span>
               <span class="excel-starter-chip" onclick="askText('Top OPEX drivers vs budget')">Top OPEX drivers</span>
@@ -2919,15 +2919,15 @@
           </div>
 
           <div class="excel-starter-group">
-            <div class="excel-starter-title">⚠ Anomalies &amp; Charts</div>
+            <div class="excel-starter-title">Anomalies &amp; Charts</div>
             <div class="excel-starter-chips">
-              <span class="excel-starter-chip" onclick="askText('Show me all metrics significantly below budget')">Alert: below budget</span>
-              <span class="excel-starter-chip" onclick="askText('Plot the cash flow chart for 2025')">Chart: cash flow</span>
+              <span class="excel-starter-chip" onclick="askText('Show me all metrics significantly below budget')">Below-budget alerts</span>
+              <span class="excel-starter-chip" onclick="askText('Plot the cash flow chart for 2025')">Cash flow chart</span>
               <span class="excel-starter-chip" onclick="askText('Run a full variance analysis on the P&L for December')">Full P&amp;L variance</span>
             </div>
           </div>
 
-          ${dupSheets > 0 ? `<div class="excel-tip" style="margin-top:10px"><strong>Tip:</strong> ${dupSheets} sheet${dupSheets > 1 ? 's have' : ' has'} metrics with the same name in different sub-sections (e.g. Prépayé vs Postpayé). Click the <strong>⊕ Fields</strong> button to pin the exact one you mean.</div>` : ''}
+          ${dupSheets > 0 ? `<div class="excel-tip" style="margin-top:10px"><strong>Tip:</strong> ${dupSheets} sheet${dupSheets > 1 ? 's have' : ' has'} metrics with the same name in different sub-sections (e.g. Prépayé vs Postpayé). Use the <strong>Fields</strong> button to pin the exact one you mean.</div>` : ''}
         </div>`;
     } else {
       // No file — explanatory upload CTA
@@ -2941,22 +2941,18 @@
 
           <div class="excel-features">
             <div class="excel-feature-card">
-              <div class="excel-feature-icon">📊</div>
               <div class="excel-feature-title">KPI Q&amp;A</div>
               <div class="excel-feature-desc">Revenue, EBITDA, ARPU, parc actif, churn — any value from any sheet, any month.</div>
             </div>
             <div class="excel-feature-card">
-              <div class="excel-feature-icon">🔍</div>
               <div class="excel-feature-title">Variance Analysis</div>
               <div class="excel-feature-desc">Compare Réel vs Budget vs N-1 and surface the biggest gaps automatically.</div>
             </div>
             <div class="excel-feature-card">
-              <div class="excel-feature-icon">📈</div>
               <div class="excel-feature-title">Charts on Demand</div>
               <div class="excel-feature-desc">Auto-generate line and bar charts from any monthly time series in the file.</div>
             </div>
             <div class="excel-feature-card">
-              <div class="excel-feature-icon">⚠</div>
               <div class="excel-feature-title">Anomaly Alerts</div>
               <div class="excel-feature-desc">Flag metrics drifting beyond threshold from plan, with severity ranking.</div>
             </div>
@@ -3025,10 +3021,10 @@
     }
     bar.classList.toggle('show', _activeMode === 'excel' && !!activeSessionId);
     // Build sheet options
-    sheetSel.innerHTML = '<option value="">📋 All sheets</option>' +
+    sheetSel.innerHTML = '<option value="">All sheets</option>' +
       _fieldMap.sheets.map(s => {
         const dup = (s.duplicate_labels || []).length;
-        return `<option value="${_esc(s.sheet_key)}">${_esc(s.display_name)}${dup ? ` (⚠ ${dup})` : ''}</option>`;
+        return `<option value="${_esc(s.sheet_key)}">${_esc(s.display_name)}${dup ? ` (${dup} conflict${dup > 1 ? 's' : ''})` : ''}</option>`;
       }).join('');
     sheetSel.value = _scopeSheet;
     _refreshSectionSelect();
@@ -3038,14 +3034,14 @@
     const sectionSel = document.getElementById('scope-section');
     const sheet = (_fieldMap?.sheets || []).find(s => s.sheet_key === _scopeSheet);
     if (!sheet) {
-      sectionSel.innerHTML = '<option value="">🎯 All sections</option>';
+      sectionSel.innerHTML = '<option value="">All sections</option>';
       sectionSel.disabled = true;
       sectionSel.classList.remove('active');
       return;
     }
     const sections = (sheet.sections || []).map(sec => sec.section).filter(Boolean);
     const unique = [...new Set(sections)];
-    sectionSel.innerHTML = '<option value="">🎯 All sections</option>' +
+    sectionSel.innerHTML = '<option value="">All sections</option>' +
       unique.map(s => `<option value="${_esc(s)}">${_esc(s)}</option>`).join('');
     sectionSel.value = _scopeSection;
     sectionSel.disabled = unique.length === 0;
@@ -3141,7 +3137,7 @@
       const hasDup = sheet.duplicate_labels && sheet.duplicate_labels.length > 0;
       const tab = document.createElement('div');
       tab.className = 'fp-tab' + (sheet.sheet_key === _activeFpTab ? ' active' : '');
-      tab.innerHTML = sheet.display_name + (hasDup ? `<span class="fp-dup-badge">⚠ ${sheet.duplicate_labels.length} conflict${sheet.duplicate_labels.length > 1 ? 's' : ''}</span>` : '');
+      tab.innerHTML = sheet.display_name + (hasDup ? `<span class="fp-dup-badge">${sheet.duplicate_labels.length} conflict${sheet.duplicate_labels.length > 1 ? 's' : ''}</span>` : '');
       tab.onclick = () => { _activeFpTab = sheet.sheet_key; _renderFpTabs(); };
       tabsEl.appendChild(tab);
     });
@@ -3158,11 +3154,11 @@
 
     if (hasDup) {
       html += `<div class="fp-conflict-banner">
-        <strong>⚠ ${dupSet.size} metric${dupSet.size > 1 ? 's' : ''} share the same name across different sub-sections.</strong><br>
+        <strong>${dupSet.size} metric${dupSet.size > 1 ? 's' : ''} share the same name across different sub-sections.</strong><br>
         Select the exact sub-section you want the AI to use — otherwise it may pick the wrong one.
       </div>`;
     } else {
-      html += `<div class="fp-noconflict-banner">✓ All metric names in this sheet are unique — no selection needed unless you want to narrow the focus.</div>`;
+      html += `<div class="fp-noconflict-banner">All metric names in this sheet are unique — no selection needed unless you want to narrow the focus.</div>`;
     }
 
     (sheet.sections || []).forEach(sec => {
@@ -3179,7 +3175,7 @@
             <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#fff" stroke-width="2.2"><polyline points="1.5,6 5,9.5 10.5,2.5"/></svg>
           </div>
           <div class="fp-metric-info">
-            <div class="fp-metric-name">${isDup ? '⚠ ' : ''}${_esc(m.label)}</div>
+            <div class="fp-metric-name">${_esc(m.label)}</div>
             ${sectionTag}
             <div class="fp-metric-code">${m.code ? m.code : '—'}</div>
           </div>
@@ -3399,7 +3395,7 @@
       const r = await fetch(`${API}/api/v1/sessions`, { method: 'POST', body: formData });
       if (r.ok) {
         const data = await r.json();
-        showToast('✓ File uploaded successfully');
+        showToast('File uploaded successfully');
         closeUploadModal();
         activeSessionId = data.session_id; activeSessionFiles = [data.file_name];
         sessionStorage.setItem('sessionId', data.session_id);
