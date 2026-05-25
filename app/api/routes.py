@@ -426,8 +426,16 @@ async def list_models():
 
 
 # ---------------------------------------------------------------------------
-# POST /api/v1/settings  — update runtime settings (API key, etc.)
+# GET /api/v1/settings  — return key presence (never the full key)
+# POST /api/v1/settings — update runtime settings (API key, etc.)
 # ---------------------------------------------------------------------------
+@router.get("/settings")
+async def get_settings():
+    """Return current runtime settings (key presence only — never the full key)."""
+    from app.config.settings import settings
+    return {"has_api_key": bool(settings.OLLAMA_API_KEY)}
+
+
 @router.post("/settings")
 async def update_settings(body: dict):
     """Update runtime settings in-memory. Changes apply immediately to all new requests."""
@@ -470,6 +478,10 @@ async def db_chat(
     Use conversation_id to maintain multi-turn history.
     When authenticated, messages are persisted to the database.
     """
+    from app.config.settings import settings as _s
+    if not _s.OLLAMA_API_KEY:
+        raise HTTPException(status_code=403, detail="NO_API_KEY")
+
     # Use a fixed "db" session so the graph is shared across all DB chats
     # but each conversation_id gets its own thread in MemorySaver.
     session_id = "db-global"
@@ -591,6 +603,10 @@ async def db_chat_stream(
     and the conv_id is injected into the final 'done' SSE event.
     """
     import json as _json
+
+    from app.config.settings import settings as _s
+    if not _s.OLLAMA_API_KEY:
+        raise HTTPException(status_code=403, detail="NO_API_KEY")
 
     session_id = "db-global"
 
