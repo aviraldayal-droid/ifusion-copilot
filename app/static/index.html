@@ -327,6 +327,61 @@
       padding: 3px 10px; border-radius: 20px; letter-spacing: 0.02em;
       white-space: nowrap;
     }
+    /* ── Mode tabs (Database / TBG Excel) ── */
+    .mode-tabs {
+      display: flex; gap: 2px;
+      background: var(--surface2); border-radius: 10px; padding: 3px;
+    }
+    .mode-tab {
+      display: flex; align-items: center; gap: 5px;
+      padding: 5px 13px; border-radius: 7px;
+      font-size: 0.78rem; font-weight: 600;
+      cursor: pointer; color: var(--muted);
+      border: none; background: none; font-family: inherit;
+      transition: all 0.14s; white-space: nowrap;
+    }
+    .mode-tab.active {
+      background: var(--surface); color: var(--accent);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+    .mode-tab:hover:not(.active) { color: var(--text); }
+    /* Excel welcome screen (shown when excel tab active, no session) */
+    .excel-welcome {
+      flex: 1; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 0; padding: 40px 24px; text-align: center;
+    }
+    .excel-welcome-icon {
+      width: 64px; height: 64px; border-radius: 18px;
+      background: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(249,115,22,0.1));
+      border: 1.5px solid rgba(16,185,129,0.25);
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 18px; font-size: 1.8rem;
+    }
+    .excel-welcome h2 { font-size: 1.35rem; font-weight: 800; margin-bottom: 8px; }
+    .excel-welcome p { color: var(--muted); font-size: 0.9rem; max-width: 400px; line-height: 1.6; margin-bottom: 26px; }
+    .excel-upload-cta {
+      display: flex; flex-direction: column; align-items: center; gap: 12px;
+    }
+    .excel-upload-btn {
+      display: flex; align-items: center; gap: 8px;
+      padding: 11px 28px; border-radius: 10px;
+      background: #10B981; color: #fff; border: none;
+      font-family: inherit; font-size: 0.9rem; font-weight: 700;
+      cursor: pointer; transition: opacity 0.14s;
+    }
+    .excel-upload-btn:hover { opacity: 0.88; }
+    .excel-welcome-hint { font-size: 0.76rem; color: var(--muted2); }
+    .excel-sample-chips {
+      display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+      margin-top: 24px; max-width: 480px;
+    }
+    .excel-sample-chip {
+      padding: 6px 14px; border-radius: 20px; font-size: 0.79rem;
+      background: var(--surface); border: 1px solid var(--border-mid);
+      color: var(--muted); cursor: pointer; transition: all 0.12s;
+    }
+    .excel-sample-chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
     .topbar-right { display: flex; align-items: center; gap: 6px; }
     .compact-select {
       background: var(--surface2); border: 1px solid rgba(249,115,22,0.13);
@@ -343,31 +398,6 @@
       font-size: 15px; transition: background 0.12s, color 0.12s;
     }
     .topbar-icon-btn:hover { background: var(--surface2); color: var(--accent); }
-
-    /* Settings dropdown */
-    .settings-wrap { position: relative; }
-    .settings-dropdown {
-      display: none; position: absolute; top: calc(100% + 8px); right: 0;
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 12px; box-shadow: var(--shadow-md, 0 8px 24px rgba(0,0,0,0.12));
-      padding: 14px 16px; width: 280px; z-index: 200;
-    }
-    .settings-dropdown.open { display: block; }
-    .settings-dropdown label { font-size: 0.72rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; display: block; margin-bottom: 5px; }
-    .settings-key-row { display: flex; gap: 6px; }
-    .settings-key-input {
-      flex: 1; height: 32px; border-radius: 8px; border: 1px solid var(--border);
-      background: var(--bg); color: var(--text); font-size: 0.82rem; padding: 0 10px;
-      font-family: monospace;
-    }
-    .settings-key-input:focus { outline: none; border-color: var(--accent); }
-    .settings-save-btn {
-      height: 32px; padding: 0 12px; border-radius: 8px; border: none;
-      background: var(--accent); color: #fff; font-size: 0.8rem; font-weight: 600;
-      cursor: pointer; white-space: nowrap;
-    }
-    .settings-save-btn:hover { opacity: 0.88; }
-    .settings-status { font-size: 0.75rem; margin-top: 7px; color: var(--muted); min-height: 16px; }
 
     /* Alert panel */
     .alert-panel {
@@ -1518,6 +1548,132 @@
     }
     .eda-sheet-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
     .eda-sheet-tab:hover:not(.active) { border-color: var(--accent); color: var(--accent); }
+
+    /* ── METRIC PICKER ──────────────────────────────────────── */
+    .metric-hints-bar {
+      display: none; align-items: center; gap: 6px; flex-wrap: wrap;
+      padding: 6px 14px 0; font-size: 0.79rem;
+    }
+    .metric-hints-bar.show { display: flex; }
+    .metric-hint-label { color: var(--muted); flex-shrink: 0; font-weight: 500; }
+    .metric-hint-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      background: var(--accent-dim); border: 1px solid rgba(249,115,22,0.28);
+      color: var(--accent); border-radius: 20px; padding: 2px 10px 2px 9px;
+      font-size: 0.77rem; font-weight: 600; white-space: nowrap; max-width: 220px;
+    }
+    .metric-hint-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .metric-hint-chip-remove {
+      cursor: pointer; flex-shrink: 0; opacity: 0.7; font-size: 0.85rem; line-height: 1;
+      background: none; border: none; color: inherit; padding: 0; margin-left: 2px;
+    }
+    .metric-hint-chip-remove:hover { opacity: 1; }
+    .metric-hints-clear {
+      color: var(--muted2); font-size: 0.74rem; cursor: pointer; margin-left: 4px; white-space: nowrap;
+    }
+    .metric-hints-clear:hover { color: var(--error); }
+
+    /* Fields picker button (inside input-box) */
+    .input-icon.fields-btn {
+      display: none; position: relative;
+    }
+    .input-icon.fields-btn.visible { display: flex; }
+    .fields-btn-badge {
+      position: absolute; top: -3px; right: -3px;
+      background: var(--accent); color: #fff; border-radius: 50%;
+      width: 14px; height: 14px; font-size: 0.6rem; font-weight: 700;
+      display: none; align-items: center; justify-content: center;
+    }
+    .fields-btn-badge.show { display: flex; }
+
+    /* Metric Picker Modal */
+    .field-picker-overlay {
+      display: none; position: fixed; inset: 0; z-index: 5000;
+      background: rgba(10,8,30,0.6); backdrop-filter: blur(4px);
+    }
+    .field-picker-overlay.show { display: flex; align-items: center; justify-content: center; }
+    .field-picker-modal {
+      background: var(--surface); border-radius: 18px; padding: 0;
+      box-shadow: var(--shadow-lg); width: min(680px, 96vw);
+      max-height: 82vh; display: flex; flex-direction: column; overflow: hidden;
+    }
+    .fp-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 18px 22px 14px; border-bottom: 1px solid var(--border);
+    }
+    .fp-title { font-size: 1rem; font-weight: 700; }
+    .fp-subtitle { font-size: 0.79rem; color: var(--muted); margin-top: 2px; }
+    .fp-close {
+      background: none; border: none; cursor: pointer; color: var(--muted);
+      font-size: 1.3rem; line-height: 1; padding: 2px;
+    }
+    .fp-close:hover { color: var(--text); }
+    .fp-tabs {
+      display: flex; gap: 0; padding: 0 22px; border-bottom: 1px solid var(--border);
+      overflow-x: auto; flex-shrink: 0;
+    }
+    .fp-tab {
+      padding: 10px 14px; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+      border-bottom: 2px solid transparent; color: var(--muted); white-space: nowrap;
+      transition: all 0.12s; flex-shrink: 0;
+    }
+    .fp-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .fp-tab:hover:not(.active) { color: var(--text); }
+    .fp-dup-badge {
+      background: rgba(249,115,22,0.14); color: var(--accent);
+      border-radius: 10px; padding: 1px 6px; font-size: 0.68rem; margin-left: 4px;
+    }
+    .fp-body { flex: 1; overflow-y: auto; padding: 14px 22px; }
+    .fp-section { margin-bottom: 18px; }
+    .fp-section-header {
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted); margin-bottom: 8px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .fp-section-header::after {
+      content: ''; flex: 1; height: 1px; background: var(--border);
+    }
+    .fp-metric-list { display: flex; flex-direction: column; gap: 3px; }
+    .fp-metric-row {
+      display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+      border-radius: 8px; cursor: pointer; transition: background 0.1s;
+    }
+    .fp-metric-row:hover { background: var(--surface2); }
+    .fp-metric-row.selected { background: var(--accent-dim); }
+    .fp-metric-check {
+      width: 16px; height: 16px; border: 1.5px solid var(--border-mid);
+      border-radius: 4px; flex-shrink: 0; display: flex; align-items: center;
+      justify-content: center; transition: all 0.1s;
+    }
+    .fp-metric-row.selected .fp-metric-check {
+      background: var(--accent); border-color: var(--accent);
+    }
+    .fp-metric-check svg { display: none; }
+    .fp-metric-row.selected .fp-metric-check svg { display: block; }
+    .fp-metric-info { flex: 1; min-width: 0; }
+    .fp-metric-name { font-size: 0.85rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fp-metric-row.selected .fp-metric-name { color: var(--accent); font-weight: 600; }
+    .fp-metric-code { font-size: 0.72rem; color: var(--muted); font-family: monospace; }
+    .fp-metric-dup { font-size: 0.7rem; color: var(--accent); font-weight: 600; margin-left: 4px; }
+    .fp-footer {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 22px; border-top: 1px solid var(--border); gap: 10px;
+    }
+    .fp-selected-count { font-size: 0.8rem; color: var(--muted); }
+    .fp-selected-count strong { color: var(--accent); }
+    .fp-footer-btns { display: flex; gap: 8px; }
+    .fp-clear-btn {
+      padding: 7px 16px; border-radius: 8px; border: 1px solid var(--border-mid);
+      background: none; color: var(--muted); cursor: pointer; font-size: 0.83rem;
+      font-family: inherit; transition: all 0.12s;
+    }
+    .fp-clear-btn:hover { color: var(--error); border-color: var(--error); }
+    .fp-apply-btn {
+      padding: 7px 20px; border-radius: 8px; border: none;
+      background: var(--accent); color: #fff; cursor: pointer; font-size: 0.83rem;
+      font-weight: 600; font-family: inherit; transition: opacity 0.12s;
+    }
+    .fp-apply-btn:hover { opacity: 0.88; }
   </style>
 </head>
 <body>
@@ -1529,12 +1685,7 @@
       <div class="auth-logo-icon">✦</div>
       <div class="auth-logo-text">iFusion Copilot</div>
     </div>
-    <div class="auth-tabs">
-      <button class="auth-tab active" id="auth-tab-login" onclick="switchAuthTab('login')">Sign In</button>
-      <button class="auth-tab"        id="auth-tab-register" onclick="switchAuthTab('register')">Create Account</button>
-    </div>
-
-    <!-- Sign In -->
+    <!-- Sign In only — registration is admin-managed -->
     <div id="auth-form-login">
       <div class="auth-error" id="auth-error-login"></div>
       <form class="auth-form" onsubmit="submitLogin(event)">
@@ -1547,26 +1698,6 @@
           <input class="auth-input" id="login-password" type="password" placeholder="••••••••" required autocomplete="current-password" />
         </div>
         <button class="auth-submit" type="submit" id="login-submit-btn">Sign In</button>
-      </form>
-    </div>
-
-    <!-- Create Account -->
-    <div id="auth-form-register" style="display:none">
-      <div class="auth-error" id="auth-error-register"></div>
-      <form class="auth-form" onsubmit="submitRegister(event)">
-        <div class="auth-field">
-          <label class="auth-label" for="register-name">Full Name</label>
-          <input class="auth-input" id="register-name" type="text" placeholder="Jane Doe" required autocomplete="name" />
-        </div>
-        <div class="auth-field">
-          <label class="auth-label" for="register-email">Email</label>
-          <input class="auth-input" id="register-email" type="email" placeholder="you@example.com" required autocomplete="email" />
-        </div>
-        <div class="auth-field">
-          <label class="auth-label" for="register-password">Password</label>
-          <input class="auth-input" id="register-password" type="password" placeholder="Min. 6 characters" required autocomplete="new-password" minlength="6" />
-        </div>
-        <button class="auth-submit" type="submit" id="register-submit-btn">Create Account</button>
       </form>
     </div>
   </div>
@@ -1669,7 +1800,17 @@
       <button class="topbar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
-      <span class="mode-badge" id="chat-mode-label">Digiwise · DB</span>
+      <div class="mode-tabs" id="mode-tabs">
+        <button class="mode-tab active" data-mode="db" onclick="switchMode('db')">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4.03 3-9 3S3 13.66 3 12"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/></svg>
+          Database
+        </button>
+        <button class="mode-tab" data-mode="excel" onclick="switchMode('excel')">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+          TBG Excel
+        </button>
+      </div>
+      <span class="mode-badge" id="chat-mode-label" style="display:none">Digiwise · DB</span>
     </div>
     <div class="topbar-right">
       <select id="model-select" class="compact-select" title="Select model"><option value="">Loading…</option></select>
@@ -1678,19 +1819,6 @@
         <option value="fr">FR</option>
       </select>
       <button class="topbar-icon-btn" id="theme-toggle-top" onclick="toggleTheme()" title="Toggle theme">☀️</button>
-      <div class="settings-wrap">
-        <button class="topbar-icon-btn" onclick="toggleSettingsDropdown()" title="Settings">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        </button>
-        <div class="settings-dropdown" id="settings-dropdown">
-          <label>Ollama Cloud API Key</label>
-          <div class="settings-key-row">
-            <input type="password" id="ollama-api-key-input" class="settings-key-input" placeholder="sk-…" autocomplete="off"/>
-            <button class="settings-save-btn" onclick="saveOllamaApiKey()">Save</button>
-          </div>
-          <div class="settings-status" id="settings-status"></div>
-        </div>
-      </div>
     </div>
   </div>
 
@@ -1739,6 +1867,12 @@
       <span class="excel-attach-name" id="excel-attach-name">file.xlsx</span>
       <button class="excel-attach-remove" onclick="removeExcelAttachment()" title="Remove file">×</button>
     </div>
+    <!-- Metric hints strip (shown when metrics are pinned) -->
+    <div class="metric-hints-bar" id="metric-hints-bar">
+      <span class="metric-hint-label">Fields:</span>
+      <div id="metric-hint-chips"></div>
+      <span class="metric-hints-clear" onclick="clearAllMetricHints()" title="Remove all pinned fields">Clear all</span>
+    </div>
     <div class="input-box">
       <div class="input-icon" title="Upload TBG Excel file" onclick="openUploadModal()">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
@@ -1746,6 +1880,11 @@
       <!-- Open EDA tool -->
       <div class="input-icon xl-btn" title="EDA Tool — analyse any Excel / CSV file" onclick="openEdaModal()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+      </div>
+      <!-- Field picker button (shown only during file sessions) -->
+      <div class="input-icon fields-btn" id="fields-btn" title="Pin specific fields to disambiguate your question" onclick="openFieldPicker()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+        <span class="fields-btn-badge" id="fields-btn-badge"></span>
       </div>
       <textarea id="user-input" rows="1" placeholder="Message iFusion Copilot…"></textarea>
       <button id="send-btn" onclick="sendMessage()" title="Send (Enter)">
@@ -1952,16 +2091,34 @@
   </div>
 </div>
 
+<!-- ── Field Picker Modal ──────────────────────────────────── -->
+<div class="field-picker-overlay" id="field-picker-overlay" onclick="if(event.target===this)closeFieldPicker()">
+  <div class="field-picker-modal">
+    <div class="fp-header">
+      <div>
+        <div class="fp-title">Pin Specific Fields</div>
+        <div class="fp-subtitle">Select the exact metrics you want the AI to focus on — helpful when the same label appears in multiple sub-sections.</div>
+      </div>
+      <button class="fp-close" onclick="closeFieldPicker()">✕</button>
+    </div>
+    <div class="fp-tabs" id="fp-tabs"></div>
+    <div class="fp-body" id="fp-body">
+      <div style="color:var(--muted);font-size:0.85rem;text-align:center;padding:40px 0">Loading fields…</div>
+    </div>
+    <div class="fp-footer">
+      <span class="fp-selected-count" id="fp-selected-count">No fields selected</span>
+      <div class="fp-footer-btns">
+        <button class="fp-clear-btn" onclick="clearPickerSelection()">Clear selection</button>
+        <button class="fp-apply-btn" onclick="applyFieldPicker()">Apply</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   const API = '';
-  function _uuid() {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) return _uuid();
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-      const r = Math.random() * 16 | 0;
-      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-    });
-  }
-  let conversationId = _uuid();
+  let _activeMode = 'db';   // 'db' | 'excel'
+  let conversationId = crypto.randomUUID();
   let activeSessionId = sessionStorage.getItem('sessionId');
   let activeSessionFiles = [];
   const _chartInstances = {};
@@ -2017,29 +2174,6 @@
   function hideAuthModal() {
     const overlay = document.getElementById('auth-overlay');
     if (overlay) overlay.classList.remove('show');
-    checkHealth();
-  }
-
-  function switchAuthTab(tab) {
-    const loginForm    = document.getElementById('auth-form-login');
-    const registerForm = document.getElementById('auth-form-register');
-    const loginTab     = document.getElementById('auth-tab-login');
-    const registerTab  = document.getElementById('auth-tab-register');
-    if (tab === 'login') {
-      loginForm.style.display    = '';
-      registerForm.style.display = 'none';
-      loginTab.classList.add('active');
-      registerTab.classList.remove('active');
-    } else {
-      loginForm.style.display    = 'none';
-      registerForm.style.display = '';
-      registerTab.classList.add('active');
-      loginTab.classList.remove('active');
-    }
-    // Clear errors
-    ['auth-error-login', 'auth-error-register'].forEach(id => {
-      const el = document.getElementById(id); if (el) { el.textContent = ''; el.classList.remove('show'); }
-    });
   }
 
   function _showAuthError(formId, msg) {
@@ -2073,34 +2207,6 @@
       _showAuthError('login', 'Network error: ' + err.message);
     } finally {
       btn.disabled = false; btn.textContent = 'Sign In';
-    }
-  }
-
-  async function submitRegister(event) {
-    event.preventDefault();
-    const btn   = document.getElementById('register-submit-btn');
-    const name  = document.getElementById('register-name').value.trim();
-    const email = document.getElementById('register-email').value.trim();
-    const pw    = document.getElementById('register-password').value;
-    btn.disabled = true; btn.textContent = 'Creating account…';
-    try {
-      const r = await fetch(`${API}/api/v1/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, password: pw }),
-      });
-      const data = await r.json();
-      if (!r.ok) { _showAuthError('register', data.detail || 'Registration failed'); return; }
-      _setAuth(data.access_token, data.user);
-      _authUser = data.user;
-      _activeConvId = null;
-      hideAuthModal();
-      _updateUserUI();
-      await loadConversationsFromApi();
-    } catch (err) {
-      _showAuthError('register', 'Network error: ' + err.message);
-    } finally {
-      btn.disabled = false; btn.textContent = 'Create Account';
     }
   }
 
@@ -2242,7 +2348,6 @@
       _setAuth(_authToken, _authUser);
       _updateUserUI();
       await loadConversationsFromApi();
-      checkHealth();
     } catch (_) {
       _setAuth(null, null); showAuthModal();
     }
@@ -2295,8 +2400,7 @@
           appendMsg('user', m.content);
         } else {
           appendMsg(
-            'bot', m.content, false,
-            meta.charts || [],
+            'bot', m.content, false, [],
             meta.inference_time || null,
             { sql: meta.sql, tables_queried: meta.tables, row_count: null }
           );
@@ -2542,19 +2646,257 @@
   initAuth();
 
   // ── File session management ──────────────────────────
-  function updateSessionStatus() {
-    const sub   = document.getElementById('chat-sub');
-    const label = document.getElementById('chat-mode-label');
-    const endBtn = document.getElementById('session-end-btn');
-    if (activeSessionId) {
-      const lbl = activeSessionFiles.length === 1 ? activeSessionFiles[0] : `${activeSessionFiles.length} files`;
-      if (sub)   sub.textContent   = `File session: ${lbl}`;
-      if (label) label.textContent = `File session · ${lbl}`;
-      endBtn.classList.add('visible');
+  // ── Mode switching (Database ↔ TBG Excel) ───────────────
+  function switchMode(mode) {
+    if (_activeMode === mode) return;
+    _activeMode = mode;
+    document.querySelectorAll('.mode-tab').forEach(t =>
+      t.classList.toggle('active', t.dataset.mode === mode));
+    // Reset conversation state
+    conversationId  = crypto.randomUUID();
+    _activeConvId   = null;
+    _reportSections = [];
+    _currentQuestion = '';
+    const rBtn = document.getElementById('report-btn');
+    if (rBtn) rBtn.classList.remove('visible');
+    Object.values(_chartInstances).forEach(({ plotDiv }) => { try { Plotly.purge(plotDiv); } catch(_) {} });
+    Object.keys(_chartInstances).forEach(k => delete _chartInstances[k]);
+
+    if (mode === 'excel') {
+      _renderExcelView();
     } else {
-      if (sub)   sub.textContent   = 'Powered by Digiwise';
-      if (label) label.textContent = 'Digiwise · DB';
+      _renderDbWelcome();
+    }
+    updateSessionStatus();
+  }
+
+  function _renderDbWelcome() {
+    const msgs = document.getElementById('messages');
+    msgs.innerHTML = `
+      <div class="welcome" id="welcome">
+        <div class="welcome-badge">✦ iFusion Copilot</div>
+        <h2>Welcome to <span class="welcome-accent">iFusion</span></h2>
+        <h3>Your AI Finance Intelligence</h3>
+        <p>Query the Digiwise database in real time — revenue, CAPEX, ARPU, and cash flow. Every answer is validated against live data.</p>
+        <div class="welcome-chips">
+          <button class="welcome-chip" onclick="askText('Revenue breakdown by category 2024')"><span class="welcome-chip-icon">📊</span>Revenue 2024</button>
+          <button class="welcome-chip" onclick="askText('Monthly CAPEX trend 2025')"><span class="welcome-chip-icon">📈</span>CAPEX Trend</button>
+          <button class="welcome-chip" onclick="askText('ARPU sortant real vs budget 2025')">📡 ARPU vs Budget</button>
+          <button class="welcome-chip" onclick="askText('Top 5 OPEX drivers in 2024')">📉 Top OPEX drivers</button>
+          <button class="welcome-chip" onclick="askText('Cash flow projection for 2025')">💳 Cash flow 2025</button>
+        </div>
+      </div>`;
+  }
+
+  function _renderExcelView() {
+    const msgs = document.getElementById('messages');
+    if (activeSessionId) {
+      // File already loaded — show a ready banner
+      msgs.innerHTML = `<div class="msg-spacer" id="msg-spacer"></div>`;
+      appendMsg('bot', `**TBG Excel session active** — ${activeSessionFiles[0] || 'file loaded'}.\n\nYou can now query any metric. Try asking about Parc Mobile, CA Mobile, P&L, or use the ⊕ button to pin specific fields.`);
+    } else {
+      // No file — show upload CTA
+      msgs.innerHTML = `
+        <div class="excel-welcome" id="excel-welcome">
+          <div class="excel-welcome-icon">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="1.75"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+          </div>
+          <h2>TBG Excel Analysis</h2>
+          <p>Upload the <strong>TBG Moov Bénin DEC 2025</strong> Excel file to query financial metrics, run variance analysis, compare periods, and generate charts.</p>
+          <div class="excel-upload-cta">
+            <button class="excel-upload-btn" onclick="openUploadModal()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Upload TBG Excel File
+            </button>
+            <span class="excel-welcome-hint">.xlsx format · TBG Moov_Africa_Bénin DEC 2025 DF SANS LIEN</span>
+          </div>
+          <div class="excel-sample-chips">
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Parc Mobile actif vs budget DEC 2025')">Parc Mobile vs budget</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'CA Mobile réel vs N-1 2025')">CA Mobile vs N-1</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Analyse variance EBITDA DEC 2025')">Variance EBITDA</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Top Opex drivers DEC 2025')">Top Opex drivers</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Cash flow projection 2025')">Cash flow</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Taux de churn mobile DEC 2025')">Taux de churn</span>
+          </div>
+        </div>`;
+    }
+  }
+
+  function _excelChipClick(el, text) {
+    if (!activeSessionId) {
+      // Prompt upload first; store question to auto-fill after upload
+      _pendingExcelQuestion = text;
+      openUploadModal();
+      showToast('Upload the TBG Excel file first');
+    } else {
+      askText(text);
+    }
+  }
+  let _pendingExcelQuestion = null;
+
+  // ── Metric Field Picker ──────────────────────────────────
+  let _fieldMap       = null;   // cached field map from API
+  let _pickerSelected = {};     // { "sheet:code": {sheet,code,label,section} }
+  let _metricHints    = [];     // committed hints passed with each message
+  let _activeFpTab    = null;   // currently viewed sheet key in picker
+
+  async function loadFieldMap() {
+    if (!activeSessionId) return;
+    try {
+      const r = await fetch(`${API}/api/v1/sessions/${activeSessionId}/field-map`);
+      if (r.ok) _fieldMap = await r.json();
+    } catch (_) {}
+  }
+
+  function openFieldPicker() {
+    if (!activeSessionId) { showToast('Upload a file session first'); return; }
+    const overlay = document.getElementById('field-picker-overlay');
+    overlay.classList.add('show');
+    // Pre-populate picker selection from committed hints
+    _pickerSelected = {};
+    _metricHints.forEach(h => { _pickerSelected[`${h.sheet}:${h.code}`] = h; });
+    if (_fieldMap) {
+      _renderFpTabs();
+    } else {
+      loadFieldMap().then(() => { if (_fieldMap) _renderFpTabs(); });
+    }
+  }
+
+  function closeFieldPicker() {
+    document.getElementById('field-picker-overlay').classList.remove('show');
+  }
+
+  function _renderFpTabs() {
+    if (!_fieldMap) return;
+    const tabsEl = document.getElementById('fp-tabs');
+    tabsEl.innerHTML = '';
+    const sheets = _fieldMap.sheets || [];
+    if (!sheets.length) { document.getElementById('fp-body').innerHTML = '<div style="color:var(--muted);text-align:center;padding:40px">No sheets found</div>'; return; }
+    if (!_activeFpTab || !sheets.find(s => s.sheet_key === _activeFpTab)) {
+      _activeFpTab = sheets[0].sheet_key;
+    }
+    sheets.forEach(sheet => {
+      const hasDup = sheet.duplicate_labels && sheet.duplicate_labels.length > 0;
+      const tab = document.createElement('div');
+      tab.className = 'fp-tab' + (sheet.sheet_key === _activeFpTab ? ' active' : '');
+      tab.innerHTML = sheet.display_name + (hasDup ? `<span class="fp-dup-badge">${sheet.duplicate_labels.length} dup</span>` : '');
+      tab.onclick = () => { _activeFpTab = sheet.sheet_key; _renderFpTabs(); };
+      tabsEl.appendChild(tab);
+    });
+    const activeSheet = sheets.find(s => s.sheet_key === _activeFpTab);
+    if (activeSheet) _renderFpBody(activeSheet);
+    _updateFpCount();
+  }
+
+  function _renderFpBody(sheet) {
+    const body = document.getElementById('fp-body');
+    const dupSet = new Set(sheet.duplicate_labels || []);
+    let html = '';
+    (sheet.sections || []).forEach(sec => {
+      html += `<div class="fp-section">
+        <div class="fp-section-header">${_esc(sec.section)}</div>
+        <div class="fp-metric-list">`;
+      (sec.metrics || []).forEach(m => {
+        const key = `${sheet.sheet_key}:${m.code || m.label}`;
+        const sel = !!_pickerSelected[key];
+        const isDup = dupSet.has(m.label);
+        html += `<div class="fp-metric-row${sel ? ' selected' : ''}" onclick="_togglePickerMetric('${_esc(sheet.sheet_key)}','${_esc(m.code || '')}','${_esc(m.label)}','${_esc(sec.section || '')}',this)">
+          <div class="fp-metric-check">
+            <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#fff" stroke-width="2.2"><polyline points="1.5,6 5,9.5 10.5,2.5"/></svg>
+          </div>
+          <div class="fp-metric-info">
+            <div class="fp-metric-name">${_esc(m.label)}${isDup ? '<span class="fp-metric-dup">· duplicate</span>' : ''}</div>
+            <div class="fp-metric-code">${m.code ? m.code : '—'}</div>
+          </div>
+        </div>`;
+      });
+      html += `</div></div>`;
+    });
+    body.innerHTML = html || '<div style="color:var(--muted);text-align:center;padding:30px">No metrics in this sheet</div>';
+  }
+
+  function _esc(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+
+  function _togglePickerMetric(sheet, code, label, section, rowEl) {
+    const key = `${sheet}:${code || label}`;
+    if (_pickerSelected[key]) {
+      delete _pickerSelected[key];
+      rowEl.classList.remove('selected');
+    } else {
+      _pickerSelected[key] = { sheet, code: code || label, label, section: section || null };
+      rowEl.classList.add('selected');
+    }
+    _updateFpCount();
+  }
+
+  function _updateFpCount() {
+    const n = Object.keys(_pickerSelected).length;
+    const el = document.getElementById('fp-selected-count');
+    if (el) el.innerHTML = n === 0 ? 'No fields selected' : `<strong>${n}</strong> field${n > 1 ? 's' : ''} selected`;
+  }
+
+  function clearPickerSelection() {
+    _pickerSelected = {};
+    _renderFpTabs();
+  }
+
+  function applyFieldPicker() {
+    _metricHints = Object.values(_pickerSelected);
+    closeFieldPicker();
+    _renderHintChips();
+  }
+
+  function _renderHintChips() {
+    const bar   = document.getElementById('metric-hints-bar');
+    const chips = document.getElementById('metric-hint-chips');
+    const badge = document.getElementById('fields-btn-badge');
+    if (!_metricHints.length) {
+      bar.classList.remove('show');
+      badge.classList.remove('show');
+      return;
+    }
+    bar.classList.add('show');
+    badge.textContent = _metricHints.length;
+    badge.classList.add('show');
+    chips.innerHTML = _metricHints.map((h, i) =>
+      `<span class="metric-hint-chip" title="${_esc(h.label)} [${_esc(h.code)}]${h.section ? ' · ' + _esc(h.section) : ''}">
+        <span>${_esc(h.label)}${h.section ? ' <em style="opacity:.7;font-style:normal">· ' + _esc(h.section) + '</em>' : ''}</span>
+        <button class="metric-hint-chip-remove" onclick="removeMetricHint(${i})" title="Remove">×</button>
+      </span>`
+    ).join('');
+  }
+
+  function removeMetricHint(idx) {
+    _metricHints.splice(idx, 1);
+    _renderHintChips();
+  }
+
+  function clearAllMetricHints() {
+    _metricHints = [];
+    _pickerSelected = {};
+    _renderHintChips();
+  }
+
+  function updateSessionStatus() {
+    const sub      = document.getElementById('chat-sub');
+    const endBtn   = document.getElementById('session-end-btn');
+    const fieldsBtn = document.getElementById('fields-btn');
+    const isExcel  = _activeMode === 'excel';
+
+    if (activeSessionId && isExcel) {
+      const lbl = activeSessionFiles.length === 1 ? activeSessionFiles[0] : `${activeSessionFiles.length} files`;
+      if (sub) sub.textContent = `File session: ${lbl}`;
+      endBtn.classList.add('visible');
+      if (fieldsBtn) fieldsBtn.classList.add('visible');
+    } else {
+      if (sub) sub.textContent = isExcel ? 'TBG Excel — no file' : 'Powered by Digiwise';
       endBtn.classList.remove('visible');
+      if (fieldsBtn) fieldsBtn.classList.remove('visible');
+      if (!activeSessionId) {
+        _metricHints = []; _pickerSelected = {}; _fieldMap = null; _renderHintChips();
+      }
     }
   }
   function endSession() {
@@ -2573,7 +2915,13 @@
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (data && data.files) {
-          activeSessionFiles = data.files; updateSessionStatus();
+          activeSessionFiles = data.files;
+          _activeMode = 'excel';
+          document.querySelectorAll('.mode-tab').forEach(t =>
+            t.classList.toggle('active', t.dataset.mode === 'excel'));
+          _renderExcelView();
+          updateSessionStatus();
+          loadFieldMap();
           showToast('Loaded existing file session.');
         } else {
           sessionStorage.removeItem('sessionId');
@@ -2598,74 +2946,8 @@
     } catch { sel.innerHTML = '<option value="">Could not load models</option>'; }
   }
   loadModels();
-  checkApiKeyStatus();
 
   // ── Theme ────────────────────────────────────────────
-  // ── Settings dropdown ─────────────────────────────────
-  function toggleSettingsDropdown() {
-    const d = document.getElementById('settings-dropdown');
-    d.classList.toggle('open');
-    if (d.classList.contains('open')) {
-      document.getElementById('ollama-api-key-input').focus();
-      document.getElementById('settings-status').textContent = '';
-    }
-  }
-
-  document.addEventListener('click', e => {
-    const wrap = e.target.closest('.settings-wrap');
-    if (!wrap) document.getElementById('settings-dropdown')?.classList.remove('open');
-  });
-
-  function _setApiKeyRequired(required) {
-    const input   = document.getElementById('user-input');
-    const sendBtn = document.getElementById('send-btn');
-    const alertEl = document.getElementById('alert-panel');
-    if (required) {
-      input.disabled   = true;
-      input.placeholder = 'Enter your Ollama API key in Settings ⚙ to continue…';
-      sendBtn.disabled  = true;
-      alertEl.style.display = 'block';
-      alertEl.innerHTML = '<span style="color:var(--accent);font-weight:600;">⚙ API key required</span> — click the gear icon in the top-right to enter your Ollama Cloud API key.';
-    } else {
-      input.disabled    = false;
-      input.placeholder = 'Message iFusion Copilot…';
-      sendBtn.disabled  = false;
-      alertEl.style.display = 'none';
-      alertEl.innerHTML = '';
-    }
-  }
-
-  async function checkApiKeyStatus() {
-    try {
-      const r = await fetch(`${API}/api/v1/settings`);
-      if (!r.ok) return;
-      const d = await r.json();
-      _setApiKeyRequired(!d.has_api_key);
-    } catch (_) {}
-  }
-
-  async function saveOllamaApiKey() {
-    const key   = document.getElementById('ollama-api-key-input').value.trim();
-    const status = document.getElementById('settings-status');
-    status.textContent = 'Saving…';
-    try {
-      const r = await fetch(`${API}/api/v1/settings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ ollama_api_key: key }),
-      });
-      if (!r.ok) throw new Error(await r.text());
-      status.style.color = 'var(--accent)';
-      status.textContent = key ? 'API key saved ✓' : 'API key cleared ✓';
-      document.getElementById('ollama-api-key-input').value = '';
-      _setApiKeyRequired(!key);
-      setTimeout(() => document.getElementById('settings-dropdown')?.classList.remove('open'), 1200);
-    } catch (e) {
-      status.style.color = '#ef4444';
-      status.textContent = 'Failed: ' + e.message;
-    }
-  }
-
   function toggleTheme() {
     isDark = !isDark;
     document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
@@ -2694,16 +2976,13 @@
     const dot  = document.getElementById('status-dot');
     const text = document.getElementById('status-text');
     try {
-      const ctrl = new AbortController();
-      const tid  = setTimeout(() => ctrl.abort(), 8000);
-      const r    = await fetch(`${API}/api/v1/db/health`, { signal: ctrl.signal });
-      clearTimeout(tid);
+      const r = await fetch(`${API}/api/v1/db/health`);
       if (r.ok) {
         const d = await r.json();
         dot.className = 'dot ok';
         text.textContent = (d.monthly_data_rows ?? 0).toLocaleString() + ' rows live';
       } else throw new Error();
-    } catch { dot.className = 'dot err'; text.textContent = 'DB Unreachable'; }
+    } catch { dot.className = 'dot err'; text.textContent = 'Unreachable'; }
   }
   checkHealth();
 
@@ -2744,8 +3023,20 @@
         closeUploadModal();
         activeSessionId = data.session_id; activeSessionFiles = [data.file_name];
         sessionStorage.setItem('sessionId', data.session_id);
+        _fieldMap = null; _metricHints = []; _pickerSelected = {}; _renderHintChips();
+        // Auto-switch to Excel tab
+        _activeMode = 'excel';
+        document.querySelectorAll('.mode-tab').forEach(t =>
+          t.classList.toggle('active', t.dataset.mode === 'excel'));
+        _renderExcelView();
         updateSessionStatus();
-        appendMsg('bot', `File session active: **${data.file_name}**. Ask any question about this file.`);
+        loadFieldMap();
+        if (data.alerts && data.alerts.length > 0) showAlertPanel(data.alerts);
+        // Auto-fill pending question from sample chip
+        if (_pendingExcelQuestion) {
+          ta.value = _pendingExcelQuestion; _pendingExcelQuestion = null;
+          ta.dispatchEvent(new Event('input'));
+        }
         if (data.alerts && data.alerts.length > 0) showAlertPanel(data.alerts);
       } else { showToast('Upload failed: ' + (await r.text())); }
     } catch (err) { showToast('Error: ' + err.message); }
@@ -2762,7 +3053,7 @@
 
   // ── New conversation ──────────────────────────────────
   function newConversation() {
-    conversationId    = _uuid();
+    conversationId    = crypto.randomUUID();
     activeConvSession = null;
     _activeConvId     = null;
     _reportSections   = [];
@@ -2795,10 +3086,9 @@
   // ── Helpers ───────────────────────────────────────────
   function scrollBottom() { const m = document.getElementById('messages'); requestAnimationFrame(() => m.scrollTo({ top: m.scrollHeight, behavior: 'smooth' })); }
   function removeWelcome() {
-    const w = document.getElementById('welcome');
-    if (!w) return;
-    w.remove();
-    // Inject spacer so first few messages sit in the middle, not the top
+    ['welcome', 'excel-welcome'].forEach(id => {
+      const w = document.getElementById(id); if (w) w.remove();
+    });
     const msgs = document.getElementById('messages');
     if (!document.getElementById('msg-spacer')) {
       const sp = document.createElement('div');
@@ -3329,6 +3619,12 @@
     // If an Excel file is attached, route to the dedicated analyzer
     if (_attachedExcel) { sendExcelAnalysis(input); return; }
     if (!input) return;
+    // Excel tab: must have a session
+    if (_activeMode === 'excel' && !activeSessionId) {
+      showToast('Upload the TBG Excel file first');
+      openUploadModal();
+      return;
+    }
     removeWelcome(); ta.value = ''; ta.style.height = 'auto';
     const btn = document.getElementById('send-btn'); btn.disabled = true;
     _currentQuestion   = input;
@@ -3344,15 +3640,19 @@
     const selectedModel    = document.getElementById('model-select').value || null;
     const selectedLanguage = document.getElementById('language-select').value || 'en';
     document.documentElement.lang = selectedLanguage;
-    const isDbChat = !activeSessionId;
+    const isDbChat = _activeMode === 'db';
     const url = isDbChat
       ? `${API}/api/v1/db/chat/stream`
-      : `${API}/api/v1/sessions/${activeSessionId}/chat/stream`;
+      : `${API}/api/v1/excel/chat/stream`;
 
     try {
       let streamBuffer = '', streamBubble = null, streamCopyId = null;
       const reqBody = { message: input, conversation_id: conversationId, model: selectedModel, language: selectedLanguage };
       if (isDbChat && _activeConvId !== null) reqBody.conv_id = _activeConvId;
+      if (!isDbChat) {
+        reqBody.session_id = activeSessionId;
+        if (_metricHints.length > 0) reqBody.metric_hints = _metricHints;
+      }
       const res = await fetch(url, {
         method: 'POST', headers: authHeaders(),
         body: JSON.stringify(reqBody),
@@ -4024,7 +4324,7 @@
       _edaCurrentData = data;
       _edaSessionId   = data.session_id || null;
       _edaIsTbg       = !!data.is_tbg;
-      _edaChatConvId  = _uuid();
+      _edaChatConvId  = crypto.randomUUID();
       _renderEdaReport(data);
     } catch (err) {
       document.getElementById('eda-loading').style.display = 'none';

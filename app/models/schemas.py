@@ -23,12 +23,20 @@ class CompareUploadResponse(BaseModel):
     alerts: list[dict] = []
 
 
+class MetricHint(BaseModel):
+    sheet: str
+    code: str
+    label: str
+    section: str | None = None
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
     conversation_id: str = Field(default="default")
     model: str | None = Field(default=None)
     language: str = Field(default="en", pattern="^(en|fr)$")
     conv_id: int | None = Field(default=None)
+    metric_hints: list[MetricHint] = Field(default_factory=list)
 
 
 class ChartSpec(BaseModel):
@@ -90,9 +98,33 @@ class HealthResponse(BaseModel):
 class MetricListItem(BaseModel):
     code: str | None
     label: str
+    section: str | None = None
     periods_available: list[str]
 
 
 class MetricListResponse(BaseModel):
     sheet: str
     metrics: list[MetricListItem]
+
+
+class FieldMapMetric(BaseModel):
+    code: str | None
+    label: str
+    section: str | None
+
+
+class FieldMapSection(BaseModel):
+    section: str
+    metrics: list[FieldMapMetric]
+
+
+class FieldMapSheet(BaseModel):
+    sheet_key: str
+    display_name: str
+    sections: list[FieldMapSection]
+    duplicate_labels: list[str]
+
+
+class FieldMapResponse(BaseModel):
+    session_id: str
+    sheets: list[FieldMapSheet]

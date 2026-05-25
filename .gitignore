@@ -1,82 +1,70 @@
-# ── Python ───────────────────────────────────────────────────────────────────
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-*.egg-info/
+*.so
 *.egg
+*.egg-info/
 dist/
 build/
-.Python
-pip-wheel-metadata/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
 
-# ── Virtual environments ──────────────────────────────────────────────────────
-venv/
+# Virtual environments
 .venv/
+venv/
 env/
-.env/
+ENV/
 
-# ── Environment / secrets ─────────────────────────────────────────────────────
-# Never commit secrets. Copy .env.example → .env and fill in values locally.
+# Environment / secrets
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
-# ── IDE / editor ─────────────────────────────────────────────────────────────
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
 .DS_Store
 Thumbs.db
 
-# ── LibreOffice / Office lock files ──────────────────────────────────────────
-.~lock.*
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
 
-# ── Large binary / data files ─────────────────────────────────────────────────
+# Uploads / user data
+uploads/
 *.xlsx
 *.xls
-*.pdf
-*.docx
-*.mp4
-*.mov
-*.avi
-*.jpeg
-*.jpg
-# PNG excluded selectively — app/static/*.png are needed, bulk dirs are not
-screenshots/
-videos/
-reference_docs/
+
+# Eval artifacts
+eval_results*.csv
+eval_cat*.csv
+eval_details.jsonl
+eval_report_*.md
+eval_category_analysis.md
+
+# Generated docs / schema dumps
+schema_doc.md
 schema_files/
 
-# ── Local SQLite store (conversation history) ─────────────────────────────────
-copilot.db
-copilot.db-wal
-copilot.db-shm
-
-# ── Database dumps ────────────────────────────────────────────────────────────
-*.sql
-*.dump
-*.bak
-
-# ── Eval / benchmarking tooling ───────────────────────────────────────────────
-eval_*.csv
-eval_*.jsonl
-eval_report*.md
-eval_category_analysis.md
-eval_scorecard.py
-check_pipeline.py
-generate_schema_doc.py
-schema_doc.md
-test_cache.py
+# Misc project files not needed in repo
+=*
 today_tasks.txt
 benchmark_questions.txt
+screenshots/
+videos/
+*.docx
+tbg_ai_output.txt
 
-# ── Misc junk ─────────────────────────────────────────────────────────────────
-=*
-oc.py
-
-# ── Claude Code internals ─────────────────────────────────────────────────────
-.claude/
-github_token.txt
+# Docker
+*.env.docker

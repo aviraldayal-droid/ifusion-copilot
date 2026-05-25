@@ -45,6 +45,10 @@ from app.models.schemas import (
     ChatRequest,
     ChatResponse,
     CompareUploadResponse,
+    FieldMapResponse,
+    FieldMapSheet,
+    FieldMapSection,
+    FieldMapMetric,
     HealthResponse,
     MetricListItem,
     MetricListResponse,
@@ -239,6 +243,7 @@ async def chat(session_id: str, request: ChatRequest):
     session = _require_session(session_id)
     parsed_data = session["parsed_data"]
 
+    hints = [h.model_dump() for h in request.metric_hints] if request.metric_hints else None
     try:
         agent_result = await run_agent(
             session_id=session_id,
@@ -247,6 +252,7 @@ async def chat(session_id: str, request: ChatRequest):
             conversation_id=request.conversation_id,
             model=request.model,
             language=request.language,
+            metric_hints=hints,
         )
         print(f"Agent response for session {session_id}:\n{agent_result['answer']}\n")
     except Exception as exc:
@@ -317,11 +323,81 @@ async def list_metrics(session_id: str, sheet_name: str):
         MetricListItem(
             code=m.get("code"),
             label=m["label"],
+            section=m.get("section"),
             periods_available=sorted(m["values"].keys()),
         )
         for m in sheet["metrics"].values()
     ]
     return MetricListResponse(sheet=sheet_name, metrics=items)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/sessions/{session_id}/field-map
+# ---------------------------------------------------------------------------
+
+_SHEET_DISPLAY_NAMES: dict[str, str] = {
+    "pnl_conso":        "P&L Consolidé",
+    "ca_mobile":        "CA Mobile",
+    "opex_consolides":  "Opex Consolidés",
+    "capex_consolides": "Capex Consolidés",
+    "mobile_money":     "Mobile Money",
+    "parc_mobile":      "Parc Mobile",
+    "marge_mobile":     "Marge Mobile",
+    "trafic_mobile":    "Trafic Mobile",
+    "data_mobile":      "Data Mobile",
+    "cash_conso":       "Cash Consolidé",
+    "marge_fixe":       "Marge Fixe",
+    "ca_fixe":          "CA Fixe",
+}
+
+
+@router.get("/sessions/{session_id}/field-map", response_model=FieldMapResponse)
+async def get_field_map(session_id: str):
+    """
+    Return a structured mapping of all sheets → sub-sections → metrics,
+    annotated with which labels appear more than once in a sheet.
+    Used by the UI to let users select specific metrics before asking a question.
+    """
+    from collections import Counter, defaultdict
+
+    session = _require_session(session_id)
+    parsed  = session["parsed_data"]
+
+    sheets_out: list[FieldMapSheet] = []
+
+    for sheet_key, sheet_data in parsed.get("sheets", {}).items():
+        metrics = sheet_data.get("metrics", {})
+
+        # Find duplicate labels within this sheet
+        label_counts = Counter(m["label"] for m in metrics.values())
+        duplicate_labels = [lbl for lbl, cnt in label_counts.items() if cnt > 1]
+
+        # Group metrics by section, preserving insertion order
+        sections_map: dict[str, list[FieldMapMetric]] = defaultdict(list)
+        for m in metrics.values():
+            sec = m.get("section") or ""
+            sections_map[sec].append(FieldMapMetric(
+                code=m.get("code"),
+                label=m["label"],
+                section=sec or None,
+            ))
+
+        sections_out = [
+            FieldMapSection(
+                section=sec_name or "General",
+                metrics=sec_metrics,
+            )
+            for sec_name, sec_metrics in sections_map.items()
+        ]
+
+        sheets_out.append(FieldMapSheet(
+            sheet_key=sheet_key,
+            display_name=_SHEET_DISPLAY_NAMES.get(sheet_key, sheet_key.replace("_", " ").title()),
+            sections=sections_out,
+            duplicate_labels=duplicate_labels,
+        ))
+
+    return FieldMapResponse(session_id=session_id, sheets=sheets_out)
 
 
 # ---------------------------------------------------------------------------
@@ -347,33 +423,6 @@ async def list_models():
         return {"models": data.get("models", [])}
     except FileNotFoundError:
         return {"models": []}
-
-
-# ---------------------------------------------------------------------------
-# POST /api/v1/settings  — update runtime settings (API key, etc.)
-# ---------------------------------------------------------------------------
-@router.get("/settings")
-async def get_settings():
-    """Return current runtime settings (key presence only — never the full key)."""
-    from app.config.settings import settings
-    return {"has_api_key": bool(settings.OLLAMA_API_KEY)}
-
-
-@router.post("/settings")
-async def update_settings(body: dict):
-    """Update runtime settings in-memory. Changes apply immediately to all new requests."""
-    import logging
-    _log = logging.getLogger("tbg.settings")
-    from app.config.settings import settings
-    if "ollama_api_key" in body:
-        key = body["ollama_api_key"] or ""
-        settings.OLLAMA_API_KEY = key
-        if key:
-            masked = key[:8] + "***" if len(key) > 8 else "***"
-            _log.info("OLLAMA_API_KEY updated via frontend — key: %s", masked)
-        else:
-            _log.info("OLLAMA_API_KEY cleared via frontend — switching to LOCAL OLLAMA")
-    return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -409,10 +458,6 @@ async def db_chat(
     Use conversation_id to maintain multi-turn history.
     When authenticated, messages are persisted to the database.
     """
-    from app.config.settings import settings as _s
-    if not _s.OLLAMA_API_KEY:
-        raise HTTPException(status_code=403, detail="NO_API_KEY")
-
     # Use a fixed "db" session so the graph is shared across all DB chats
     # but each conversation_id gets its own thread in MemorySaver.
     session_id = "db-global"
@@ -460,7 +505,6 @@ async def db_chat(
             "tables":         result.get("tables_queried"),
             "inference_time": result.get("inference_time"),
             "cache_hit":      result.get("cache_hit"),
-            "charts":         charts_raw,
         }
         await _asyncio.to_thread(save_message, conv_id, "bot", response_text, bot_meta)
         await _asyncio.to_thread(touch_conversation, conv_id)
@@ -490,6 +534,8 @@ async def session_chat_stream(session_id: str, request: ChatRequest):
     session = _require_session(session_id)
     parsed_data = session["parsed_data"]
 
+    stream_hints = [h.model_dump() for h in request.metric_hints] if request.metric_hints else None
+
     async def event_generator():
         try:
             async for chunk in run_agent_stream(
@@ -499,6 +545,7 @@ async def session_chat_stream(session_id: str, request: ChatRequest):
                 conversation_id=request.conversation_id,
                 model=request.model,
                 language=request.language,
+                metric_hints=stream_hints,
             ):
                 yield chunk
         except Exception as exc:
@@ -532,9 +579,6 @@ async def db_chat_stream(
     and the conv_id is injected into the final 'done' SSE event.
     """
     import json as _json
-    from app.config.settings import settings as _s
-    if not _s.OLLAMA_API_KEY:
-        raise HTTPException(status_code=403, detail="NO_API_KEY")
 
     session_id = "db-global"
 
@@ -584,7 +628,6 @@ async def db_chat_stream(
                             "tables":         done_payload.get("tables_queried"),
                             "inference_time": done_payload.get("inference_time"),
                             "cache_hit":      done_payload.get("cache_hit"),
-                            "charts":         done_payload.get("charts", []),
                         }
                         try:
                             await _asyncio.to_thread(save_message, conv_id, "bot", full_answer, bot_meta)

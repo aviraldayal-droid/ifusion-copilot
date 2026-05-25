@@ -175,6 +175,7 @@ def _parse_sheet(ws) -> dict:
     sorted_periods = sorted(col_map.keys())
 
     metrics: dict[str, dict] = {}
+    current_section: str = ""
 
     for row in all_rows[date_row_idx + 2 :]:
         if not row or len(row) <= min_date_col:
@@ -197,9 +198,11 @@ def _parse_sheet(ws) -> dict:
                 values[period] = pv
 
         if not values:
+            # Row has a label but no numeric data — treat as sub-section header
+            current_section = label
             continue
 
-        metrics[metric_key] = {"label": label, "code": code, "values": values}
+        metrics[metric_key] = {"label": label, "code": code, "section": current_section, "values": values}
 
     return {"periods": sorted_periods, "metrics": metrics}
 

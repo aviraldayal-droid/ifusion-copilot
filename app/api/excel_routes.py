@@ -28,7 +28,7 @@ from plotly.io import to_json
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from app.agents.graph import _make_llm, run_agent
+from app.agents.graph import _make_llm, run_agent, run_agent_stream
 from app.parsers.excel_parser import SHEETS_OF_INTEREST, parse_tbg_file
 
 log = logging.getLogger("tbg.eda")
@@ -48,24 +48,23 @@ _FONT_FAMILY    = '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif
 _eda_sessions: dict[str, dict] = {}
 
 # TBG metric search targets for KPI cards: (sheet_key, partial_labels, display_name)
-# NOTE: avoid "EBIT" alone — it matches "EBITDA" as a substring.
 _TBG_KPI_TARGETS = [
     ("pnl_conso",  ["CA Global", "Total Revenu", "Chiffre d'Affaires", "Revenus"],  "CA Global"),
     ("pnl_conso",  ["EBITDA"],                                                        "EBITDA"),
     ("pnl_conso",  ["Total Opex", "Opex Total", "Total des Opex"],                   "Total Opex"),
-    ("pnl_conso",  ["Total Capex", "Capex Total", "Capex Consolidés"],               "Total Capex"),
-    ("pnl_conso",  ["Résultat net", "Résultat Net", "Net result", "Résultat"],       "Résultat Net"),
+    ("pnl_conso",  ["Capex", "Total Capex", "Capex Total"],                          "Total Capex"),
+    ("pnl_conso",  ["Résultat net", "Résultat Net", "EBIT", "Net result"],           "Résultat Net"),
     ("cash_conso", ["Cash Flow", "Net Cash", "Flux de trésorerie"],                  "Cash Flow"),
 ]
 
 # TBG chart targets: (sheet_key, partial_labels, chart_title)
 _TBG_CHART_TARGETS = [
-    ("pnl_conso",  ["CA Global", "Total Revenu", "Chiffre d'Affaires"],        "CA Global"),
-    ("pnl_conso",  ["EBITDA"],                                                   "EBITDA"),
-    ("pnl_conso",  ["Total Opex", "Opex Total"],                                "Total Opex"),
-    ("pnl_conso",  ["Total Capex", "Capex Total", "Capex Consolidés"],          "Total Capex"),
-    ("ca_mobile",  ["CA Mobile", "Chiffre d'Affaires Mobile", "CA Global"],    "CA Mobile"),
-    ("cash_conso", ["Cash Flow", "Net Cash"],                                    "Cash Flow"),
+    ("pnl_conso",  ["CA Global", "Total Revenu", "Chiffre d'Affaires"],      "CA Global"),
+    ("pnl_conso",  ["EBITDA"],                                                 "EBITDA"),
+    ("pnl_conso",  ["Total Opex", "Opex Total"],                              "Total Opex"),
+    ("pnl_conso",  ["Capex", "Total Capex"],                                  "Total Capex"),
+    ("ca_mobile",  ["CA Mobile", "Chiffre d'Affaires Mobile", "CA Global"],  "CA Mobile"),
+    ("cash_conso", ["Cash Flow", "Net Cash"],                                  "Cash Flow"),
 ]
 
 
@@ -780,3 +779,120 @@ async def eda_chat(req: EdaChatRequest):
         prompt = _generic_chat_prompt(session["context"], req.question, req.language)
         answer = _call_llm(prompt)
         return {"answer": answer, "inference_time": 0}
+
+
+# ── New TBG upload + streaming chat endpoints ─────────────────────────────────
+
+import json as _json
+from datetime import datetime, timezone
+from fastapi.responses import StreamingResponse
+from app.api.routes import _sessions, _THRESHOLDS_PATH
+from app.agents.tools import run_alerts_check
+from app.models.schemas import UploadResponse
+
+
+@router.post("/upload", response_model=UploadResponse, status_code=201)
+async def excel_upload(file: UploadFile = File(...)):
+    """
+    Upload a TBG Excel file and create a main session (stores in shared _sessions).
+    Equivalent to POST /api/v1/sessions.
+    """
+    upload_filename = file.filename or ""
+    if not upload_filename:
+        raise HTTPException(status_code=400, detail="File has no filename.")
+
+    suffix = "." + upload_filename.rsplit(".", 1)[-1] if "." in upload_filename else ".xlsx"
+    content = await file.read()
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        parsed = parse_tbg_file(tmp_path)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    if not parsed.get("sheets"):
+        raise HTTPException(
+            status_code=422,
+            detail="Could not parse any TBG sheets from the uploaded file. "
+                   "Ensure it is a valid TBG Excel export.",
+        )
+
+    all_periods = parsed.get("all_periods", [])
+    latest_period = all_periods[-1] if all_periods else ""
+    alerts: list[dict] = []
+    if latest_period:
+        try:
+            with open(_THRESHOLDS_PATH) as _tf:
+                thresholds = _json.load(_tf)
+            alerts = run_alerts_check(parsed, thresholds, latest_period)
+        except Exception:
+            pass
+
+    session_id = str(uuid.uuid4())
+    _sessions[session_id] = {
+        "session_id": session_id,
+        "files": [upload_filename],
+        "parsed_data": parsed,
+        "alerts": alerts,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    return UploadResponse(
+        session_id=session_id,
+        file_name=upload_filename,
+        sheets_parsed=list(parsed["sheets"].keys()),
+        periods_available=all_periods,
+        message=f"Session created. {len(parsed['sheets'])} reports parsed, "
+                f"{len(all_periods)} periods available.",
+        alerts=alerts,
+    )
+
+
+class ExcelStreamChatRequest(BaseModel):
+    session_id: str
+    message: str
+    conversation_id: str = "default"
+    model: str | None = None
+    language: str = "en"
+    metric_hints: list[dict] = []
+
+
+@router.post("/chat/stream")
+async def excel_chat_stream(req: ExcelStreamChatRequest):
+    """
+    Streaming chat against a session created by POST /api/v1/excel/upload.
+    Returns Server-Sent Events.
+    """
+    session = _sessions.get(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{req.session_id}' not found or expired.")
+
+    parsed_data = session["parsed_data"]
+    hints = req.metric_hints if req.metric_hints else None
+
+    async def event_generator():
+        try:
+            async for chunk in run_agent_stream(
+                session_id=req.session_id,
+                parsed_data=parsed_data,
+                message=req.message,
+                conversation_id=req.conversation_id,
+                model=req.model,
+                language=req.language,
+                metric_hints=hints,
+            ):
+                yield chunk
+        except Exception as exc:
+            yield f"event: error\ndata: {_json.dumps({'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

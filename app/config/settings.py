@@ -15,7 +15,7 @@ _ENV_FILES = [
 
 class Settings(BaseSettings):
     DB_USER: str = "digiwise_rw"
-    DB_PASSWORD: str = ""
+    DB_PASSWORD: str = "Digi@3456rw$"
     DB_HOST: str = "197.230.47.51"
     DB_PORT: str = "5432"
     DB_NAME: str = "digiwise"
@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_BASE_URL: str = "https://api.ollama.com"
     OLLAMA_MODEL: str = "nemotron-3-nano:30b"
-    OLLAMA_API_KEY: str = ""  # Set for Ollama Cloud, leave empty for local
+    OLLAMA_API_KEY: str = "94ca38adf5b74aef88aa278870ceca94.kFdNKzcm-ixpeGhjar8u8rW5"  # Set for Ollama Cloud, leave empty for local
 
     # Narration model for format_answer — defaults to OLLAMA_MODEL if empty.
     # Use a fluent language model here (e.g. mistral-large-3, qwen3-next:80b).
@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     LANGSMITH_API_KEY: str = ""
     LANGCHAIN_PROJECT: str = "tbg-ai-copilot"
     LANGCHAIN_TRACING_V2: str = "true"
+
+    # Admin key required to call POST /api/v1/auth/register.
+    # Set a strong secret here; leave empty to disable all registration.
+    ADMIN_KEY: str = ""
 
     MAX_SESSIONS: int = 50
     SESSION_TTL_HOURS: int = 24

@@ -216,7 +216,8 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         lines = [f"Metrics in '{key}':"]
         for mkey, m in sheet["metrics"].items():
             code_str = f" [{m['code']}]" if m.get("code") else ""
-            lines.append(f"  {mkey}{code_str}: {m['label']}")
+            section_str = f" (section: {m['section']})" if m.get("section") else ""
+            lines.append(f"  {mkey}{code_str}{section_str}: {m['label']}")
         return "\n".join(lines)
 
     # ===================================================================

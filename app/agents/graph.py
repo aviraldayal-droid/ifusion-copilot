@@ -193,8 +193,7 @@ def _make_llm(model: str | None = None) -> OllamaLLM:
     if settings.is_ollama_cloud:
         headers = {"Authorization": f"Bearer {settings.OLLAMA_API_KEY}"}
         client = Client(host=settings.OLLAMA_BASE_URL, headers=headers, timeout=_OLLAMA_TIMEOUT)
-        masked = settings.OLLAMA_API_KEY[:8] + "***" if len(settings.OLLAMA_API_KEY) > 8 else "***"
-        log.info("LLM initialized — API: OLLAMA CLOUD | key: %s | model: %s | timeout: %ds", masked, resolved, _OLLAMA_TIMEOUT)
+        log.info("LLM initialized — API: OLLAMA CLOUD | model: %s | timeout: %ds", resolved, _OLLAMA_TIMEOUT)
     else:
         client = Client(host=settings.OLLAMA_BASE_URL, timeout=_OLLAMA_TIMEOUT)
         log.info("LLM initialized — API: LOCAL OLLAMA | model: %s | base_url: %s", resolved, settings.OLLAMA_BASE_URL)
@@ -663,84 +662,7 @@ REVENUE BY SEGMENT — revenue_raw_data (DAILY DATA):
   ✗ Do NOT use financial_metrics_data for segment breakdown — it does not have ca_voix/ca_data columns.
   ✗ Do NOT use monthly_evolution for revenue values — it stores YoY evolution rates, not amounts.
 
-CAPEX QUERIES — for questions about total CapEx, CapEx vs budget, CapEx trends, CapEx YoY:
-  Category: 'Capex Consolidés'. Same dedup CTE + JOIN path as OPEX/EBITDA (financial_metrics_data).
-
-  ⚠ TABLE SELECTION RULE:
-    • "total CapEx", "CapEx vs budget", "CapEx trend", "CapEx monthly", "CapEx YoY", "CapEx by type",
-      "top N CapEx drivers vs budget", "CapEx drivers"
-      → use financial_metrics_data (has real_value, budget_value, last_year_real_value)
-      ⚠ DRIVER LIMIT RULE: 'Capex Consolidés' has EXACTLY 3 financial types (Réseau,
-        Commercial et Marketing, Administratif et Financier). NEVER add LIMIT to driver/type
-        queries — you will always get at most 3 rows. If user asks "top 5 drivers" but only 3
-        types exist, return all 3 without LIMIT and note in the answer that only 3 exist.
-    • "top N CapEx projects", "biggest projects", "largest projects by spend"
-      → use capex_data JOIN capex_projects GROUP BY project_title LIMIT N
-        (no budget_value available at project level — show actual spend only)
-    • "CapEx by supplier", "CapEx by project", "CapEx by direction", "which supplier"
-      → use capex_data JOIN capex_projects (see CAPEX HIERARCHY below)
-
-  ✓ Total CapEx for a year (e.g. "total CapEx for 2024", "what was CapEx in 2024?"):
-    WITH fmd AS (
-      SELECT DISTINCT ON (financial_metric_id, date) *
-      FROM financial_metrics_data
-      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
-    )
-    SELECT ROUND(SUM(fmd.real_value)::numeric, 0)           AS total_capex_m_fcfa,
-           ROUND(SUM(fmd.budget_value)::numeric, 0)          AS budget_m_fcfa,
-           ROUND(SUM(fmd.last_year_real_value)::numeric, 0)  AS prior_year_m_fcfa,
-           ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance
-    FROM fmd
-    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
-    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
-    JOIN financial_categories fc ON fc.id = ft.financial_category_id
-    WHERE fc.name = 'Capex Consolidés'
-      AND EXTRACT(YEAR FROM fmd.date) = 2024
-      AND fmd.real_value IS NOT NULL;
-
-  ✓ Monthly CapEx trend (e.g. "CapEx monthly trend 2024", "CapEx month by month"):
-    WITH fmd AS (
-      SELECT DISTINCT ON (financial_metric_id, date) *
-      FROM financial_metrics_data
-      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
-    )
-    SELECT EXTRACT(MONTH FROM fmd.date)::int             AS month,
-           ROUND(SUM(fmd.real_value)::numeric, 0)        AS total_capex_m_fcfa,
-           ROUND(SUM(fmd.budget_value)::numeric, 0)      AS budget_m_fcfa,
-           ROUND(SUM(fmd.last_year_real_value)::numeric, 0) AS prior_year_m_fcfa
-    FROM fmd
-    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
-    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
-    JOIN financial_categories fc ON fc.id = ft.financial_category_id
-    WHERE fc.name = 'Capex Consolidés'
-      AND EXTRACT(YEAR FROM fmd.date) = 2024
-      AND fmd.real_value IS NOT NULL
-    GROUP BY EXTRACT(MONTH FROM fmd.date)
-    ORDER BY month;
-
-  ✓ CapEx breakdown by type / top CapEx drivers vs budget (e.g. "CapEx breakdown 2024", "CapEx by category",
-    "top 5 CapEx drivers 2024", "CapEx drivers vs budget") — returns ALL types (max 3), no LIMIT:
-    WITH fmd AS (
-      SELECT DISTINCT ON (financial_metric_id, date) *
-      FROM financial_metrics_data
-      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
-    )
-    SELECT ft.name AS capex_type,
-           ROUND(SUM(fmd.real_value)::numeric, 0)            AS actual_m_fcfa,
-           ROUND(SUM(fmd.budget_value)::numeric, 0)          AS budget_m_fcfa,
-           ROUND(SUM(fmd.last_year_real_value)::numeric, 0)  AS prior_year_m_fcfa,
-           ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance
-    FROM fmd
-    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
-    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
-    JOIN financial_categories fc ON fc.id = ft.financial_category_id
-    WHERE fc.name = 'Capex Consolidés'
-      AND EXTRACT(YEAR FROM fmd.date) = 2024
-      AND fmd.real_value IS NOT NULL
-    GROUP BY ft.name
-    ORDER BY actual_m_fcfa DESC;
-
-CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by direction:
+CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by month:
   capex_projects: id [PK], supplier_name, direction_name, project_title, contract_no
   capex_data:     id [PK], capex_projects_id (FK → capex_projects.id), month, year,
                   equipment, services, additional_costs
@@ -780,17 +702,6 @@ CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by dire
     WHERE cd.year = 2025
     GROUP BY cp.project_title, cp.supplier_name, cp.direction_name
     ORDER BY total_cost DESC;
-
-  ✓ Top N CapEx projects by spend (e.g. "top 5 CapEx projects 2024", "biggest CapEx projects"):
-    SELECT cp.project_title, cp.supplier_name, cp.direction_name,
-           SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)) AS total_capex_m_fcfa
-    FROM capex_data cd
-    JOIN capex_projects cp ON cp.id = cd.capex_projects_id
-    WHERE cd.year = 2024
-    GROUP BY cp.project_title, cp.supplier_name, cp.direction_name
-    ORDER BY total_capex_m_fcfa DESC
-    LIMIT 5;
-    ⚠ No budget_value at project level — show actual spend + direction only. Do NOT add budget column.
 
   ⚠ CAPEX PROJECT GROUPING RULE — CRITICAL:
     When grouping by project, ALWAYS use (cp.project_title, cp.supplier_name, cp.direction_name).
@@ -870,38 +781,17 @@ CAPEX HIERARCHY — for questions about CAPEX suppliers, projects, spend by dire
     WHERE cd25.year = 2025
     GROUP BY cd25.month ORDER BY cd25.month;
 
-  ✓ CAPEX percentage by category/direction — use for "percentage by category", "share per direction",
-    "what % was spent on each category" (NOTE: "category" in CapEx = cp.direction_name, NOT financial_categories):
-    SELECT cp.direction_name,
-           SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)) AS total_capex,
-           ROUND(
-             SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)) * 100.0
-             / NULLIF(SUM(SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)))
-                      OVER (), 0),
-             2
-           ) AS share_pct
-    FROM capex_data cd
-    JOIN capex_projects cp ON cp.id = cd.capex_projects_id
-    WHERE cd.year = 2024
-    GROUP BY cp.direction_name
-    ORDER BY total_capex DESC;
-
-  ✓ CAPEX breakdown by cost type as percentage (equipment vs services vs additional_costs):
+  ✓ CAPEX breakdown by type as percentage:
     SELECT
-      SUM(COALESCE(cd.equipment,0))        AS equipment_spend,
-      SUM(COALESCE(cd.services,0))         AS services_spend,
-      SUM(COALESCE(cd.additional_costs,0)) AS additional_costs_spend,
-      ROUND(SUM(COALESCE(cd.equipment,0)) * 100.0
-            / NULLIF(SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)), 0), 2)
-            AS equipment_pct,
-      ROUND(SUM(COALESCE(cd.services,0)) * 100.0
-            / NULLIF(SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)), 0), 2)
-            AS services_pct,
-      ROUND(SUM(COALESCE(cd.additional_costs,0)) * 100.0
-            / NULLIF(SUM(COALESCE(cd.equipment,0) + COALESCE(cd.services,0) + COALESCE(cd.additional_costs,0)), 0), 2)
-            AS additional_costs_pct
+      SUM(cd.equipment)         AS equipment_spend,
+      SUM(cd.services)          AS services_spend,
+      SUM(cd.additional_costs)  AS additional_costs_spend,
+      ROUND(SUM(cd.equipment) * 100.0
+            / NULLIF(SUM(cd.equipment + cd.services + cd.additional_costs), 0)::numeric, 2) AS equipment_pct,
+      ROUND(SUM(cd.services)  * 100.0
+            / NULLIF(SUM(cd.equipment + cd.services + cd.additional_costs), 0)::numeric, 2) AS services_pct
     FROM capex_data cd
-    WHERE cd.year = 2024;
+    WHERE cd.year = 2025;
 
 CASH FLOW HIERARCHY — use ONLY for questions about flux de trésorerie / treasury / liquidity:
   realised_cashflow → cashflow_sections → cashflow_categories → cashflow_subcategories
@@ -972,50 +862,6 @@ MARGINS / PROFITABILITY QUERIES:
     GROUP BY fm.name
     ORDER BY total_fcfa DESC;
 
-  ✓ P&L monthly breakdown for a year (e.g. "P&L month by month 2025", "P&L breakdown monthly"):
-    — returns one row per month with total actual, budget, prior year across all P&L metrics
-    — NEVER add AND fmd.budget_value IS NOT NULL here — early months may have no budget yet
-    WITH fmd AS (
-      SELECT DISTINCT ON (financial_metric_id, date) *
-      FROM financial_metrics_data
-      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
-    )
-    SELECT EXTRACT(MONTH FROM fmd.date)::int             AS month,
-           ROUND(SUM(fmd.real_value)::numeric, 0)        AS actual_m_fcfa,
-           ROUND(SUM(fmd.budget_value)::numeric, 0)      AS budget_m_fcfa,
-           ROUND(SUM(fmd.last_year_real_value)::numeric, 0) AS prior_year_m_fcfa,
-           ROUND((SUM(fmd.real_value) - SUM(fmd.budget_value))::numeric, 0) AS variance_m_fcfa
-    FROM fmd
-    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
-    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
-    JOIN financial_categories fc ON fc.id = ft.financial_category_id
-    WHERE fc.name = 'P&L conso'
-      AND EXTRACT(YEAR FROM fmd.date) = 2025
-      AND fmd.real_value IS NOT NULL
-    GROUP BY EXTRACT(MONTH FROM fmd.date)
-    ORDER BY month;
-
-  ✓ P&L monthly breakdown by KPI type (e.g. "P&L breakdown by category per month 2025"):
-    — returns one row per month per P&L type (revenue, EBITDA, etc.)
-    WITH fmd AS (
-      SELECT DISTINCT ON (financial_metric_id, date) *
-      FROM financial_metrics_data
-      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
-    )
-    SELECT EXTRACT(MONTH FROM fmd.date)::int             AS month,
-           ft.name                                       AS pnl_type,
-           ROUND(SUM(fmd.real_value)::numeric, 0)        AS actual_m_fcfa,
-           ROUND(SUM(fmd.budget_value)::numeric, 0)      AS budget_m_fcfa
-    FROM fmd
-    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
-    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
-    JOIN financial_categories fc ON fc.id = ft.financial_category_id
-    WHERE fc.name = 'P&L conso'
-      AND EXTRACT(YEAR FROM fmd.date) = 2025
-      AND fmd.real_value IS NOT NULL
-    GROUP BY EXTRACT(MONTH FROM fmd.date), ft.name
-    ORDER BY month, pnl_type;
-
   ✗ Do NOT invent a "margin" column — it does not exist. Always JOIN to financial_metric.name.
   ✗ Do NOT use fc.name = 'Marge brute Mobile' for margin % — that category stores costs, not %.
 
@@ -1052,41 +898,10 @@ MARGINS / PROFITABILITY QUERIES:
       AND EXTRACT(YEAR FROM e.date) = 2025
     ORDER BY e.date;
 
-  ✓ EBITDA margin for a quarter (e.g. "EBITDA margin Q1 2025", "Q2 2024 EBITDA margin"):
-    — uses financial_metrics_data only (no revenue_raw_data join needed)
-    — 'Mobile' is total mobile revenue (CA) stored in P&L conso category
-    — Q1 = months 1–3, Q2 = 4–6, Q3 = 7–9, Q4 = 10–12
-    WITH fmd AS (
-      SELECT DISTINCT ON (financial_metric_id, date) *
-      FROM financial_metrics_data
-      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
-    ),
-    q_data AS (
-      SELECT fm.name AS metric,
-             SUM(fmd.real_value) AS total
-      FROM fmd
-      JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
-      JOIN financial_types ft   ON ft.id  = fm.financial_type_id
-      JOIN financial_categories fc ON fc.id = ft.financial_category_id
-      WHERE fc.name = 'P&L conso'
-        AND fm.name IN ('EBITDA', 'Mobile')
-        AND EXTRACT(YEAR FROM fmd.date) = 2025
-        AND EXTRACT(MONTH FROM fmd.date) BETWEEN 1 AND 3
-        AND fmd.real_value IS NOT NULL
-      GROUP BY fm.name
-    )
-    SELECT
-      ROUND(MAX(CASE WHEN metric = 'EBITDA' THEN total END)::numeric, 0)  AS ebitda_m_fcfa,
-      ROUND(MAX(CASE WHEN metric = 'Mobile' THEN total END)::numeric, 0)  AS ca_mobile_m_fcfa,
-      ROUND((MAX(CASE WHEN metric = 'EBITDA' THEN total END)::numeric * 100.0
-        / NULLIF(MAX(CASE WHEN metric = 'Mobile' THEN total END)::numeric, 0)), 2) AS ebitda_margin_pct
-    FROM q_data;
-
   JOIN KEY: financial_metrics_data → revenue_raw_data (for CA Global):
     DATE_TRUNC('month', fmd.date) = DATE_TRUNC('month', rrd.date) — aggregate rrd by month first.
     ALWAYS divide SUM(revenue_raw_data.ca_global) by 1,000,000 to convert to millions before dividing.
   Use this join whenever computing a ratio of a financial_metrics_data metric against CA Global.
-  ⚠ If revenue_raw_data has no data for the requested period, use the quarterly example above instead.
 
 CHURN RATE QUERIES — for questions about churn, taux de churn, attrition, résiliation:
   ⚠ There is NO metric called 'churn' or 'taux de churn' directly in financial_metric.
@@ -1461,42 +1276,13 @@ YEAR-ON-YEAR (YoY) COMPARISON — for questions about growth, YoY, vs last year,
 OPEX QUERIES — for questions about operating expenses, charges, coûts opérationnels:
   Category: 'Opex Consolidés'. Same JOIN path as revenue.
 
-  ⚠ QUERY SELECTION RULE — choose the pattern based on what the question asks:
-    • Contains "monthly trend", "month by month", "evolution mensuelle", "par mois"
-      AND no specific month named → MONTHLY TREND (GROUP BY month, no ft.name)
-    • Contains "breakdown", "by type", "by category", "par type", "which types"
-      AND a specific month named (e.g. "May 2024", "March", "Q1") → SINGLE MONTH BREAKDOWN
-      (GROUP BY ft.name WITH month + year filter) — returns one row per opex type
-    • Contains "breakdown", "by type", "which categories" AND no specific month
-      → YEARLY BREAKDOWN (GROUP BY ft.name, full year) — returns one row per opex type
-    • Simple "what is opex for [month]?" with no "breakdown" keyword
-      → also use SINGLE MONTH BREAKDOWN (GROUP BY ft.name + MONTH filter)
-    ✗ NEVER return a single-row ungrouped total — ALWAYS group by ft.name or by month.
-    ✗ NEVER apply GROUP BY ft.name to a monthly trend question — it produces wrong results.
-    ✓ A breakdown query MUST return multiple rows (3–8 rows, one per opex type).
-      If your query has no GROUP BY ft.name, it is wrong for any breakdown question.
+  ⚠ MANDATORY RULE: NEVER return a single-row total for an OPEX question.
+    ANY OPEX question (single month, full year, trend) MUST GROUP BY ft.name to show the
+    breakdown by OpEx type. A single SUM with no GROUP BY is FORBIDDEN for OpEx.
+    ✗ WRONG: SELECT SUM(fmd.real_value) AS opex_may_2024 FROM fmd ... (single total — FORBIDDEN)
+    ✓ CORRECT: GROUP BY ft.name to return one row per OpEx type.
 
-  ✓ Monthly OpEx trend — use for "monthly trend", "month by month", "evolution mensuelle" (e.g. "opex 2024 monthly trend"):
-    WITH fmd AS (
-      SELECT DISTINCT ON (financial_metric_id, date) *
-      FROM financial_metrics_data
-      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
-    )
-    SELECT EXTRACT(MONTH FROM fmd.date)::int        AS month,
-           ROUND(SUM(fmd.real_value)::numeric, 0)         AS total_opex_m_fcfa,
-           ROUND(SUM(fmd.budget_value)::numeric, 0)        AS budget_m_fcfa,
-           ROUND(SUM(fmd.last_year_real_value)::numeric, 0) AS prior_year_m_fcfa
-    FROM fmd
-    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
-    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
-    JOIN financial_categories fc ON fc.id = ft.financial_category_id
-    WHERE fc.name = 'Opex Consolidés'
-      AND EXTRACT(YEAR FROM fmd.date) = 2024
-      AND fmd.real_value IS NOT NULL
-    GROUP BY EXTRACT(MONTH FROM fmd.date)
-    ORDER BY month;
-
-  ✓ OpEx breakdown by type for a year — use for "breakdown", "by category", "which types", or "total opex for the year":
+  ✓ OpEx breakdown by type for a year:
     WITH fmd AS (
       SELECT DISTINCT ON (financial_metric_id, date) *
       FROM financial_metrics_data
@@ -1512,7 +1298,7 @@ OPEX QUERIES — for questions about operating expenses, charges, coûts opérat
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
     WHERE fc.name = 'Opex Consolidés'
-      AND EXTRACT(YEAR FROM fmd.date) = 2024
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
       AND fmd.real_value IS NOT NULL
     GROUP BY ft.name ORDER BY actual_m_fcfa DESC;
 
@@ -1538,8 +1324,7 @@ OPEX QUERIES — for questions about operating expenses, charges, coûts opérat
     ORDER BY actual DESC
     LIMIT 5;
 
-  ✓ OpEx breakdown by type for a SINGLE MONTH — use for "breakdown for May 2024", "opex May 2024",
-    "what was opex for March 2025", or any question naming a specific month (returns 3–8 rows, one per type):
+  ✓ OpEx breakdown by type for a SINGLE MONTH (e.g. "what was opex for March 2025?"):
     WITH fmd AS (
       SELECT DISTINCT ON (financial_metric_id, date) *
       FROM financial_metrics_data
@@ -1555,11 +1340,28 @@ OPEX QUERIES — for questions about operating expenses, charges, coûts opérat
     JOIN financial_types ft   ON ft.id  = fm.financial_type_id
     JOIN financial_categories fc ON fc.id = ft.financial_category_id
     WHERE fc.name = 'Opex Consolidés'
-      AND EXTRACT(YEAR FROM fmd.date) = 2024
-      AND EXTRACT(MONTH FROM fmd.date) = 5
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
+      AND EXTRACT(MONTH FROM fmd.date) = 3
       AND fmd.real_value IS NOT NULL
     GROUP BY ft.name
     ORDER BY actual_m_fcfa DESC;
+
+  ✓ Monthly OpEx trend:
+    WITH fmd AS (
+      SELECT DISTINCT ON (financial_metric_id, date) *
+      FROM financial_metrics_data
+      ORDER BY financial_metric_id, date, version_id DESC NULLS LAST
+    )
+    SELECT EXTRACT(MONTH FROM fmd.date)::int AS month,
+           ROUND(SUM(fmd.real_value)::numeric, 0) AS total_opex
+    FROM fmd
+    JOIN financial_metric fm  ON fm.id  = fmd.financial_metric_id
+    JOIN financial_types ft   ON ft.id  = fm.financial_type_id
+    JOIN financial_categories fc ON fc.id = ft.financial_category_id
+    WHERE fc.name = 'Opex Consolidés'
+      AND EXTRACT(YEAR FROM fmd.date) = 2025
+      AND fmd.real_value IS NOT NULL
+    GROUP BY EXTRACT(MONTH FROM fmd.date) ORDER BY month;
 
 BFR / WORKING CAPITAL QUERIES — for questions about BFR, "Besoin en Fonds de Roulement", working capital,
   "variation de BFR", "BFR opérationnel", or "sub-components of BFR":
@@ -2294,14 +2096,11 @@ You MUST copy numbers from DATA FACTS verbatim into your Summary and Key Insight
 Month labels are always full names (January … December) — never write "Month N".
 Do NOT re-derive totals, peaks, shares, or trend direction from the table.
 
-OPEX ANALYSIS RULE:
-  • When the result contains a `month` column (monthly trend): state the annual total, identify the peak and trough months,
-    comment on seasonality. If budget_m_fcfa is present, note the worst budget miss month.
-  • When the result contains an `opex_type` column (breakdown by type): state the grand total of actual_m_fcfa
-    across all types, then name the largest cost category. Discuss cost structure, budget adherence per type,
-    and YoY change if available.
+OPEX ANALYSIS RULE — when the result contains an opex_type column (breakdown by OpEx type):
+  The Summary MUST state the grand total of actual_m_fcfa across all types, then name the largest cost category.
+  The Analysis must discuss cost structure: which types dominate, budget adherence per type, YoY change if available.
   Never state "no comparative data available" if a prior_year_m_fcfa column is present in the result.
-  Key Insights must include one bullet on the largest OpEx driver and one on budget vs actual (if those columns exist).
+  Key Insights must include one bullet on the largest OpEx driver and one on budget vs actual.
 
 OUTPUT FORMAT — use EXACTLY this structure (no deviations):
 
@@ -2368,12 +2167,7 @@ STRICT RULES:
 - Reproduce the table AS-IS including all | characters.
 - NEVER output SQL, column types, or any technical internals.
 - NEVER invent numbers not present in the results or DATA FACTS.
-- NEVER compute variance %, growth %, or ratio % yourself — these MUST come from the result columns.
-  If no variance_pct / growth_pct / share_pct column exists in the result, do NOT mention percentages
-  in Summary or Key Insights. State absolute differences in M FCFA instead.
 - If a cell shows "(null)" → write "no data available". NEVER write "None" or "null".
-- If the question asked for "top N" but fewer than N rows are in the result, note in the Summary
-  how many actually exist (e.g. "Only 3 CapEx driver categories exist in the database").
 - Do NOT start with "I'm sorry", "Based on", "The query returned", or "Here is".
 - {language_instruction}
 """
@@ -2832,49 +2626,6 @@ def _detect_quarterly_availability(rows: list[dict], cols: list[str]) -> str:
     return "QUARTERLY DATA AVAILABILITY: " + " | ".join(parts)
 
 
-def _ensure_table_present(answer: str, table: str) -> str:
-    """
-    The narration LLM sometimes drops the data table despite explicit instructions.
-    If the answer does not contain a markdown pipe table, inject the pre-built
-    ASCII table after the Summary section (or before Analysis if no Summary).
-    """
-    if not table:
-        return answer
-
-    has_table = False
-    for line in answer.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("|") and stripped.count("|") >= 2:
-            has_table = True
-            break
-    if has_table:
-        return answer
-
-    # Inject right before the Analysis section if present, otherwise after Summary
-    lines = answer.splitlines()
-    insert_idx = None
-    for i, line in enumerate(lines):
-        if line.strip().lower().startswith("**analysis**"):
-            insert_idx = i
-            break
-    if insert_idx is None:
-        for i, line in enumerate(lines):
-            if line.strip().lower().startswith("**summary**"):
-                # Find end of the Summary paragraph (next blank line or next bold heading)
-                j = i + 1
-                while j < len(lines) and lines[j].strip() and not lines[j].strip().startswith("**"):
-                    j += 1
-                insert_idx = j
-                break
-    if insert_idx is None:
-        # No structured headings found — append at the end
-        return f"{answer.rstrip()}\n\n{table}\n"
-
-    log.info("format_answer: injecting missing data table at line %d", insert_idx)
-    new_lines = lines[:insert_idx] + ["", table, ""] + lines[insert_idx:]
-    return "\n".join(new_lines)
-
-
 def _make_format_answer_node(llm: ChatOllama):
     def format_answer(state: DbPipelineState) -> dict:
         retry     = state.get("retry_count", 0)
@@ -2948,9 +2699,8 @@ def _make_format_answer_node(llm: ChatOllama):
                 )),
             ])
             log.info("format_answer LLM done in %.1fs", time.monotonic() - t0)
-            answer_text = _ensure_table_present(response.content, table)
             return {
-                "answer":      answer_text,
+                "answer":      response.content,
                 "chart_specs": [chart_spec] if chart_spec else [],
             }
         except Exception as llm_err:
@@ -3024,9 +2774,9 @@ def _get_db_pipeline(model: str | None = None) -> object:
 
 _INTENT_CLASSIFIER_PROMPT = """\
 Classify the user's question as exactly one of these five labels:
-  definition   — ONLY asking for an explanation or definition of a financial term, with no request for data
-  data_query   — asking for data, numbers, trends, comparisons, or analysis from the database
-  both         — EXPLICITLY asking for a definition AND data in the SAME sentence (rare)
+  definition   — ONLY asking for an explanation or definition of a financial term
+  data_query   — asking for data, numbers, trends, or analysis from the database
+  both         — asking BOTH a definition AND data in the same message
   out_of_scope — asking about something the financial database cannot answer:
                  external regulatory decrees, tax law amendments, court rulings,
                  government policy documents, news events, competitor information,
@@ -3036,27 +2786,10 @@ Classify the user's question as exactly one of these five labels:
 
 The question may be in English OR French. Classify based on meaning, not language.
 
-KEY RULES:
-- If the question asks for actual numbers, values, trends, comparisons, or a specific period
-  (e.g. "for 2025", "in Q1", "monthly", "vs budget") → data_query.
-- If the question asks only "what is X?" or "define X" with no request for values → definition.
-- "What is X for 2025?" where the intent is to get the metric value → data_query.
-- "What is X?" where the intent is to understand the meaning of X → definition.
-- "vs", "compared to", "breakdown", "trend", "monthly", "per month", "variance" → data_query.
-- Use "both" ONLY when the question EXPLICITLY asks for a definition AND data together,
-  e.g. "What is EBITDA and what was it in 2024?" Do NOT use "both" just because
-  a question mentions a financial term alongside a period.
-
 English examples:
   "What is CAPEX?"                                          → definition
-  "What is CapEx vs budget for 2025?"                       → data_query
-  "What is CapEx vs budget values for 2025?"                → data_query
-  "capex vs budget for 2025"                                → data_query
-  "capex vs budget variance for 2025"                       → data_query
-  "What was CapEx in 2024?"                                 → data_query
   "Show me monthly revenue for 2025"                        → data_query
   "What is EBITDA and what was it in 2024?"                 → both
-  "Define OPEX and show me last year's numbers"             → both
   "Hello, how are you?"                                     → other
   "Which decree triggered the variance in Redevances?"      → out_of_scope
   "What tax law caused the OPEX increase?"                  → out_of_scope
@@ -3065,10 +2798,8 @@ English examples:
 
 French examples:
   "Qu'est-ce que l'EBITDA ?"                                → definition
-  "Quel est l'EBITDA pour 2024 ?"                           → data_query
   "Montre-moi l'évolution du chiffre d'affaires"            → data_query
-  "Capex vs budget 2025"                                    → data_query
-  "Qu'est-ce que le churn et quel est son taux en 2024 ?"   → both
+  "Qu'est-ce que le churn et quel est son taux ?"           → both
   "Quel décret a causé la variance des redevances ?"        → out_of_scope
   "Quelle ordonnance fiscale a modifié les charges ?"       → out_of_scope
   "Bonjour, comment ça va ?"                                → other
@@ -3742,6 +3473,17 @@ async def run_db_agent_stream(
     })
 
 
+def _build_hint_prefix(metric_hints: list[dict]) -> str:
+    if not metric_hints:
+        return ""
+    lines = ["[Metric disambiguation — for this question use ONLY these specific metrics:]"]
+    for h in metric_hints:
+        section_str = f" (sub-section: {h['section']})" if h.get("section") else ""
+        lines.append(f"  • Sheet: {h['sheet']} | Code: {h['code']} | Label: {h['label']}{section_str}")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 async def run_agent(
     session_id: str,
     parsed_data: dict,
@@ -3749,6 +3491,7 @@ async def run_agent(
     conversation_id: str = "default",
     model: str | None = None,
     language: str = "en",
+    metric_hints: list[dict] | None = None,
 ) -> dict:
     t_start   = time.monotonic()
     graph     = get_or_create_graph(session_id, parsed_data, model=model)
@@ -3756,7 +3499,8 @@ async def run_agent(
     config    = {"configurable": {"thread_id": thread_id}}
 
     lang_instr = _LANG_INSTRUCTIONS.get(language, _LANG_INSTRUCTIONS["en"])
-    augmented  = f"[{lang_instr}]\n{message}"
+    hint_prefix = _build_hint_prefix(metric_hints or [])
+    augmented  = f"[{lang_instr}]\n{hint_prefix}{message}"
 
     result = await graph.ainvoke(
         {"messages": [HumanMessage(content=augmented)]},
@@ -3788,6 +3532,7 @@ async def run_agent_stream(
     conversation_id: str = "default",
     model: str | None = None,
     language: str = "en",
+    metric_hints: list[dict] | None = None,
 ):
     """
     Async generator that yields SSE-formatted strings for streaming file-session chat.
@@ -3805,7 +3550,8 @@ async def run_agent_stream(
         config = {"configurable": {"thread_id": thread_id}}
 
         lang_instr = _LANG_INSTRUCTIONS.get(language, _LANG_INSTRUCTIONS["en"])
-        augmented = f"[{lang_instr}]\n{message}"
+        hint_prefix = _build_hint_prefix(metric_hints or [])
+        augmented = f"[{lang_instr}]\n{hint_prefix}{message}"
 
         chart_specs = []
         final_answer = ""

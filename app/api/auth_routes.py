@@ -1,7 +1,7 @@
 """
 Authentication endpoints for TBG Copilot.
 
-POST /api/v1/auth/register  — create account, return JWT
+POST /api/v1/auth/register  — admin-only account creation (requires X-Admin-Key header)
 POST /api/v1/auth/login     — verify credentials, return JWT
 GET  /api/v1/auth/me        — return current user profile (requires auth)
 """
@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 
 from app.auth.deps import get_current_user
 from app.auth.jwt_utils import create_access_token, hash_password, verify_password
+from app.config.settings import settings
 from app.db.auth_store import create_user, get_user_by_email
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -45,8 +46,15 @@ class TokenResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(body: RegisterRequest):
-    """Create a new account and return an access token."""
+async def register(body: RegisterRequest, x_admin_key: str | None = Header(default=None)):
+    """Admin-only: create a new account. Requires X-Admin-Key header matching ADMIN_KEY setting."""
+    admin_key = settings.ADMIN_KEY.strip()
+    if not admin_key or x_admin_key != admin_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Registration is disabled. Contact the administrator.",
+        )
+
     existing = await asyncio.to_thread(get_user_by_email, body.email)
     if existing:
         raise HTTPException(
