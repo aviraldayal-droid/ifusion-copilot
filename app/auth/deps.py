@@ -57,6 +57,15 @@ async def get_current_user(token: str | None = Depends(oauth2_scheme)) -> dict:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # Reject if another session has logged in since this token was issued
+    sid = payload.get("sid", "")
+    if sid and user.get("session_token") != sid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     return user
 
 

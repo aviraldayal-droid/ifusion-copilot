@@ -2192,6 +2192,20 @@
     return h;
   }
 
+  async function apiFetch(url, opts = {}) {
+    const res = await fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
+    if (res.status === 401) {
+      const data = await res.clone().json().catch(() => ({}));
+      if (data.detail === 'Session expired. Please log in again.') {
+        _setAuth(null, null);
+        _updateUserUI();
+        showAuthModal();
+        throw new Error('session_expired');
+      }
+    }
+    return res;
+  }
+
   function _ollamaKeyStorageKey() {
     return 'ollama_api_key_' + (_authUser?.id || 'anon');
   }

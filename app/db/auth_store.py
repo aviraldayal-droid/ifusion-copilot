@@ -29,8 +29,10 @@ CREATE TABLE IF NOT EXISTS public.copilot_users (
     email         VARCHAR(320) UNIQUE NOT NULL,
     name          VARCHAR(200) NOT NULL,
     password_hash VARCHAR(200) NOT NULL,
+    session_token VARCHAR(64),
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+ALTER TABLE public.copilot_users ADD COLUMN IF NOT EXISTS session_token VARCHAR(64);
 
 CREATE TABLE IF NOT EXISTS public.copilot_conversations (
     id         SERIAL PRIMARY KEY,
@@ -117,7 +119,7 @@ def get_user_by_email(email: str) -> dict | None:
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, email, name, password_hash, created_at FROM public.copilot_users WHERE email = %s",
+                "SELECT id, email, name, password_hash, session_token, created_at FROM public.copilot_users WHERE email = %s",
                 (email.lower().strip(),),
             )
             row = cur.fetchone()
@@ -133,11 +135,29 @@ def get_user_by_id(user_id: int) -> dict | None:
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, email, name, created_at FROM public.copilot_users WHERE id = %s",
+                "SELECT id, email, name, session_token, created_at FROM public.copilot_users WHERE id = %s",
                 (user_id,),
             )
             row = cur.fetchone()
         return dict(row) if row else None
+    finally:
+        pool.putconn(conn)
+
+
+def update_session_token(user_id: int, session_token: str) -> None:
+    ensure_schema()
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE public.copilot_users SET session_token = %s WHERE id = %s",
+                (session_token, user_id),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         pool.putconn(conn)
 

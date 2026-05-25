@@ -35,12 +35,13 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(_prepare(plain), hashed.encode("utf-8"))
 
 
-def create_access_token(user_id: int, email: str) -> str:
-    """Create a signed JWT containing user_id and email, valid for 7 days."""
+def create_access_token(user_id: int, email: str, session_token: str = "") -> str:
+    """Create a signed JWT containing user_id, email and session_token, valid for 7 days."""
     now     = datetime.now(timezone.utc)
     payload = {
         "sub":   str(user_id),
         "email": email,
+        "sid":   session_token,
         "iat":   now,
         "exp":   now + timedelta(days=_EXPIRE_DAYS),
     }

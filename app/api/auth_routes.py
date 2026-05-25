@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import asyncio
 
+import secrets
+
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 
 from app.auth.deps import get_current_user
 from app.auth.jwt_utils import create_access_token, hash_password, verify_password
 from app.config.settings import settings
-from app.db.auth_store import create_user, get_user_by_email
+from app.db.auth_store import create_user, get_user_by_email, update_session_token
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -83,7 +85,9 @@ async def login(body: LoginRequest):
             detail="Invalid email or password.",
         )
 
-    token = create_access_token(user["id"], user["email"])
+    session_token = secrets.token_hex(32)
+    await asyncio.to_thread(update_session_token, user["id"], session_token)
+    token = create_access_token(user["id"], user["email"], session_token)
     return TokenResponse(
         access_token=token,
         user={"id": user["id"], "email": user["email"], "name": user["name"]},
