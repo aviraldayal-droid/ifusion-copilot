@@ -426,6 +426,18 @@ async def list_models():
 
 
 # ---------------------------------------------------------------------------
+# POST /api/v1/settings  — update runtime settings (API key, etc.)
+# ---------------------------------------------------------------------------
+@router.post("/settings")
+async def update_settings(body: dict):
+    """Update runtime settings in-memory. Changes apply immediately to all new requests."""
+    from app.config.settings import settings
+    if "ollama_api_key" in body:
+        settings.OLLAMA_API_KEY = body["ollama_api_key"] or ""
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/v1/health
 # ---------------------------------------------------------------------------
 @router.get("/health", response_model=HealthResponse)
