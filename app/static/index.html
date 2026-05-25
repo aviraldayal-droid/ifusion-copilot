@@ -2116,9 +2116,17 @@
 </div>
 
 <script>
+  function _uuid() {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0;
+      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+  }
+
   const API = '';
   let _activeMode = 'db';   // 'db' | 'excel'
-  let conversationId = crypto.randomUUID();
+  let conversationId = _uuid();
   let activeSessionId = sessionStorage.getItem('sessionId');
   let activeSessionFiles = [];
   const _chartInstances = {};
@@ -2653,7 +2661,7 @@
     document.querySelectorAll('.mode-tab').forEach(t =>
       t.classList.toggle('active', t.dataset.mode === mode));
     // Reset conversation state
-    conversationId  = crypto.randomUUID();
+    conversationId  = _uuid();
     _activeConvId   = null;
     _reportSections = [];
     _currentQuestion = '';
@@ -3053,7 +3061,7 @@
 
   // ── New conversation ──────────────────────────────────
   function newConversation() {
-    conversationId    = crypto.randomUUID();
+    conversationId    = _uuid();
     activeConvSession = null;
     _activeConvId     = null;
     _reportSections   = [];
@@ -4324,7 +4332,7 @@
       _edaCurrentData = data;
       _edaSessionId   = data.session_id || null;
       _edaIsTbg       = !!data.is_tbg;
-      _edaChatConvId  = crypto.randomUUID();
+      _edaChatConvId  = _uuid();
       _renderEdaReport(data);
     } catch (err) {
       document.getElementById('eda-loading').style.display = 'none';
