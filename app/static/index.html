@@ -382,6 +382,49 @@
       color: var(--muted); cursor: pointer; transition: all 0.12s;
     }
     .excel-sample-chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+    .excel-features {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px; margin: 4px 0 22px; max-width: 600px;
+    }
+    .excel-feature-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 12px 14px; text-align: left;
+    }
+    .excel-feature-icon { font-size: 1.1rem; margin-bottom: 6px; }
+    .excel-feature-title { font-size: 0.86rem; font-weight: 700; margin-bottom: 4px; color: var(--text); }
+    .excel-feature-desc { font-size: 0.74rem; color: var(--muted); line-height: 1.45; }
+    .excel-chips-label {
+      font-size: 0.72rem; font-weight: 700; color: var(--muted2);
+      text-transform: uppercase; letter-spacing: 0.07em;
+      margin: 18px 0 8px;
+    }
+    .excel-ready-banner {
+      margin: 18px 14px 4px; padding: 16px 20px;
+      background: linear-gradient(135deg, rgba(16,185,129,0.08), rgba(249,115,22,0.06));
+      border: 1px solid rgba(16,185,129,0.3);
+      border-radius: 12px;
+    }
+    .excel-ready-title { font-size: 0.95rem; font-weight: 700; margin-bottom: 4px; }
+    .excel-ready-meta { font-size: 0.78rem; color: var(--muted); margin-bottom: 14px; }
+    .excel-starter-group { margin-bottom: 14px; }
+    .excel-starter-group:last-child { margin-bottom: 0; }
+    .excel-starter-title {
+      font-size: 0.74rem; font-weight: 700; color: var(--muted2);
+      text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px;
+    }
+    .excel-starter-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .excel-starter-chip {
+      padding: 5px 11px; border-radius: 16px; font-size: 0.78rem;
+      background: var(--bg); border: 1px solid var(--border-mid);
+      color: var(--text); cursor: pointer; transition: all 0.12s;
+    }
+    .excel-starter-chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+    .excel-tip {
+      font-size: 0.75rem; color: var(--muted);
+      padding: 8px 12px; border-left: 2px solid rgba(249,115,22,0.4);
+      background: rgba(249,115,22,0.04);
+      border-radius: 0 6px 6px 0;
+    }
     .topbar-right { display: flex; align-items: center; gap: 6px; }
     .compact-select {
       background: var(--surface2); border: 1px solid rgba(249,115,22,0.13);
@@ -2788,32 +2831,103 @@
   function _renderExcelView() {
     const msgs = document.getElementById('messages');
     if (activeSessionId) {
-      // File already loaded — show a ready banner
-      msgs.innerHTML = `<div class="msg-spacer" id="msg-spacer"></div>`;
-      appendMsg('bot', `**TBG Excel session active** — ${activeSessionFiles[0] || 'file loaded'}.\n\nYou can now query any metric. Try asking about Parc Mobile, CA Mobile, P&L, or use the ⊕ button to pin specific fields.`);
+      // File loaded — show a structured ready banner with starter prompts
+      const fileName = activeSessionFiles[0] || 'TBG file';
+      const sheetsCount = (_fieldMap?.sheets || []).length || 12;
+      const dupSheets = (_fieldMap?.sheets || []).filter(s => (s.duplicate_labels || []).length > 0).length;
+      msgs.innerHTML = `
+        <div class="msg-spacer" id="msg-spacer"></div>
+        <div class="excel-ready-banner">
+          <div class="excel-ready-title">✓ ${escHtml(fileName)} loaded</div>
+          <div class="excel-ready-meta">${sheetsCount} sheet${sheetsCount > 1 ? 's' : ''} parsed · ask in English or French · numbers come straight from the workbook</div>
+
+          <div class="excel-starter-group">
+            <div class="excel-starter-title">📊 Revenue &amp; Profitability</div>
+            <div class="excel-starter-chips">
+              <span class="excel-starter-chip" onclick="askText('What is the December 2025 revenue vs budget?')">Revenue vs budget</span>
+              <span class="excel-starter-chip" onclick="askText('Show the EBITDA trend for 2025')">EBITDA trend 2025</span>
+              <span class="excel-starter-chip" onclick="askText('Which months had the biggest gap vs budget?')">Biggest budget gaps</span>
+            </div>
+          </div>
+
+          <div class="excel-starter-group">
+            <div class="excel-starter-title">👥 Subscribers (Parc Mobile)</div>
+            <div class="excel-starter-chips">
+              <span class="excel-starter-chip" onclick="askText('Total active mobile subscribers in December 2025')">Active subscribers</span>
+              <span class="excel-starter-chip" onclick="askText('How many prepaid activations in December 2025?')">Prepaid activations</span>
+              <span class="excel-starter-chip" onclick="askText('Compare 2G, 3G and 4G subscribers')">2G / 3G / 4G split</span>
+            </div>
+          </div>
+
+          <div class="excel-starter-group">
+            <div class="excel-starter-title">💰 Costs &amp; CAPEX</div>
+            <div class="excel-starter-chips">
+              <span class="excel-starter-chip" onclick="askText('Where did we overspend on CAPEX in 2025?')">CAPEX overspend</span>
+              <span class="excel-starter-chip" onclick="askText('Top OPEX drivers vs budget')">Top OPEX drivers</span>
+              <span class="excel-starter-chip" onclick="askText('Personnel costs trend for 2025')">Personnel costs</span>
+            </div>
+          </div>
+
+          <div class="excel-starter-group">
+            <div class="excel-starter-title">⚠ Anomalies &amp; Charts</div>
+            <div class="excel-starter-chips">
+              <span class="excel-starter-chip" onclick="askText('Show me all metrics significantly below budget')">Alert: below budget</span>
+              <span class="excel-starter-chip" onclick="askText('Plot the cash flow chart for 2025')">Chart: cash flow</span>
+              <span class="excel-starter-chip" onclick="askText('Run a full variance analysis on the P&L for December')">Full P&amp;L variance</span>
+            </div>
+          </div>
+
+          ${dupSheets > 0 ? `<div class="excel-tip" style="margin-top:10px"><strong>Tip:</strong> ${dupSheets} sheet${dupSheets > 1 ? 's have' : ' has'} metrics with the same name in different sub-sections (e.g. Prépayé vs Postpayé). Click the <strong>⊕ Fields</strong> button to pin the exact one you mean.</div>` : ''}
+        </div>`;
     } else {
-      // No file — show upload CTA
+      // No file — explanatory upload CTA
       msgs.innerHTML = `
         <div class="excel-welcome" id="excel-welcome">
           <div class="excel-welcome-icon">
             <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="1.75"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
           </div>
-          <h2>TBG Excel Analysis</h2>
-          <p>Upload the <strong>TBG Moov Bénin DEC 2025</strong> Excel file to query financial metrics, run variance analysis, compare periods, and generate charts.</p>
+          <h2>TBG Excel Copilot</h2>
+          <p>Upload your monthly <strong>Tableau de Bord de Gestion</strong> and ask natural questions about any metric — in English or French. The AI reads the workbook, finds the right rows, and answers with real numbers (no guesses).</p>
+
+          <div class="excel-features">
+            <div class="excel-feature-card">
+              <div class="excel-feature-icon">📊</div>
+              <div class="excel-feature-title">KPI Q&amp;A</div>
+              <div class="excel-feature-desc">Revenue, EBITDA, ARPU, parc actif, churn — any value from any sheet, any month.</div>
+            </div>
+            <div class="excel-feature-card">
+              <div class="excel-feature-icon">🔍</div>
+              <div class="excel-feature-title">Variance Analysis</div>
+              <div class="excel-feature-desc">Compare Réel vs Budget vs N-1 and surface the biggest gaps automatically.</div>
+            </div>
+            <div class="excel-feature-card">
+              <div class="excel-feature-icon">📈</div>
+              <div class="excel-feature-title">Charts on Demand</div>
+              <div class="excel-feature-desc">Auto-generate line and bar charts from any monthly time series in the file.</div>
+            </div>
+            <div class="excel-feature-card">
+              <div class="excel-feature-icon">⚠</div>
+              <div class="excel-feature-title">Anomaly Alerts</div>
+              <div class="excel-feature-desc">Flag metrics drifting beyond threshold from plan, with severity ranking.</div>
+            </div>
+          </div>
+
           <div class="excel-upload-cta">
             <button class="excel-upload-btn" onclick="openUploadModal()">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
               Upload TBG Excel File
             </button>
-            <span class="excel-welcome-hint">.xlsx format · TBG Moov_Africa_Bénin DEC 2025 DF SANS LIEN</span>
+            <span class="excel-welcome-hint">.xlsx format · e.g. TBG Moov_Africa_Bénin DEC 2025</span>
           </div>
+
+          <div class="excel-chips-label">Sample questions (click to pre-fill)</div>
           <div class="excel-sample-chips">
-            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Parc Mobile actif vs budget DEC 2025')">Parc Mobile vs budget</span>
-            <span class="excel-sample-chip" onclick="_excelChipClick(this,'CA Mobile réel vs N-1 2025')">CA Mobile vs N-1</span>
-            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Analyse variance EBITDA DEC 2025')">Variance EBITDA</span>
-            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Top Opex drivers DEC 2025')">Top Opex drivers</span>
-            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Cash flow projection 2025')">Cash flow</span>
-            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Taux de churn mobile DEC 2025')">Taux de churn</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'What is December 2025 revenue vs budget?')">Revenue vs budget</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'How many active mobile subscribers in December 2025?')">Active subscribers</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Where did we overspend on CAPEX?')">CAPEX overspend</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Show me all metrics significantly below budget')">Below-budget alerts</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Plot EBITDA trend for 2025')">EBITDA trend chart</span>
+            <span class="excel-sample-chip" onclick="_excelChipClick(this,'Compare prepaid vs postpaid activations')">Prepaid vs Postpaid</span>
           </div>
         </div>`;
     }
@@ -3031,7 +3145,7 @@
             t.classList.toggle('active', t.dataset.mode === 'excel'));
           _renderExcelView();
           updateSessionStatus();
-          loadFieldMap();
+          loadFieldMap().then(() => { if (_activeMode === 'excel' && !document.querySelector('.msg.user')) _renderExcelView(); });
           showToast('Loaded existing file session.');
         } else {
           sessionStorage.removeItem('sessionId');
@@ -3140,7 +3254,7 @@
           t.classList.toggle('active', t.dataset.mode === 'excel'));
         _renderExcelView();
         updateSessionStatus();
-        loadFieldMap();
+        loadFieldMap().then(() => { if (_activeMode === 'excel' && !document.querySelector('.msg.user')) _renderExcelView(); });
         if (data.alerts && data.alerts.length > 0) showAlertPanel(data.alerts);
         // Auto-fill pending question from sample chip
         if (_pendingExcelQuestion) {
