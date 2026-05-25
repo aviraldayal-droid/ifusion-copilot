@@ -189,9 +189,11 @@ _OLLAMA_TIMEOUT = 300  # seconds per-token read timeout (streaming resets this p
 
 def _make_llm(model: str | None = None) -> OllamaLLM:
     """Create Ollama client for local or cloud Ollama."""
+    from app.config.settings import request_api_key
     resolved = model or settings.OLLAMA_MODEL
-    if settings.is_ollama_cloud:
-        headers = {"Authorization": f"Bearer {settings.OLLAMA_API_KEY}"}
+    api_key  = request_api_key.get() or settings.OLLAMA_API_KEY
+    if api_key:
+        headers = {"Authorization": f"Bearer {api_key}"}
         client = Client(host=settings.OLLAMA_BASE_URL, headers=headers, timeout=_OLLAMA_TIMEOUT)
         log.info("LLM initialized — API: OLLAMA CLOUD | model: %s | timeout: %ds", resolved, _OLLAMA_TIMEOUT)
     else:

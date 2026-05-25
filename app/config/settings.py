@@ -1,6 +1,11 @@
 import os
+from contextvars import ContextVar
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Per-request Ollama API key — set by route handlers, read by _make_llm().
+# Falls back to settings.OLLAMA_API_KEY when not set.
+request_api_key: ContextVar[str] = ContextVar("request_api_key", default="")
 
 # Compute .env search paths at module level so Docker shallow paths work.
 # Local: /home/.../tbg_copilot/tb/app/config/settings.py → parents 2,3,4 all valid.
@@ -23,7 +28,7 @@ class Settings(BaseSettings):
     # OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_BASE_URL: str = "https://api.ollama.com"
     OLLAMA_MODEL: str = "nemotron-3-nano:30b"
-    OLLAMA_API_KEY: str = "94ca38adf5b74aef88aa278870ceca94.kFdNKzcm-ixpeGhjar8u8rW5"  # Set for Ollama Cloud, leave empty for local
+    OLLAMA_API_KEY: str = ""  # Set for Ollama Cloud, leave empty for local
 
     # Narration model for format_answer — defaults to OLLAMA_MODEL if empty.
     # Use a fluent language model here (e.g. mistral-large-3, qwen3-next:80b).

@@ -30,7 +30,7 @@ from typing import Annotated
 
 import asyncio as _asyncio
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from app.auth.deps import get_optional_user
 from app.db.auth_store import create_conversation, save_message, touch_conversation
 
@@ -469,6 +469,7 @@ async def health():
 @router.post("/db/chat", response_model=ChatResponse)
 async def db_chat(
     request: ChatRequest,
+    http_request: Request,
     optional_user: dict | None = Depends(get_optional_user),
 ):
     """
@@ -478,9 +479,12 @@ async def db_chat(
     Use conversation_id to maintain multi-turn history.
     When authenticated, messages are persisted to the database.
     """
-    from app.config.settings import settings as _s
-    if not _s.OLLAMA_API_KEY:
+    from app.config.settings import request_api_key, settings as _s
+    per_user_key = http_request.headers.get("X-Ollama-Api-Key", "").strip()
+    effective_key = per_user_key or _s.OLLAMA_API_KEY
+    if not effective_key:
         raise HTTPException(status_code=403, detail="NO_API_KEY")
+    _token = request_api_key.set(per_user_key)
 
     # Use a fixed "db" session so the graph is shared across all DB chats
     # but each conversation_id gets its own thread in MemorySaver.
@@ -595,6 +599,7 @@ from fastapi.responses import StreamingResponse as FastAPIStreamingResponse
 @router.post("/db/chat/stream")
 async def db_chat_stream(
     request: ChatRequest,
+    http_request: Request,
     optional_user: dict | None = Depends(get_optional_user),
 ):
     """
@@ -604,9 +609,12 @@ async def db_chat_stream(
     """
     import json as _json
 
-    from app.config.settings import settings as _s
-    if not _s.OLLAMA_API_KEY:
+    from app.config.settings import request_api_key, settings as _s
+    per_user_key = http_request.headers.get("X-Ollama-Api-Key", "").strip()
+    effective_key = per_user_key or _s.OLLAMA_API_KEY
+    if not effective_key:
         raise HTTPException(status_code=403, detail="NO_API_KEY")
+    request_api_key.set(per_user_key)
 
     session_id = "db-global"
 
