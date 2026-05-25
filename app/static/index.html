@@ -1618,6 +1618,44 @@
     .eda-sheet-tab:hover:not(.active) { border-color: var(--accent); color: var(--accent); }
 
     /* ── METRIC PICKER ──────────────────────────────────────── */
+    /* Scope bar — quick sheet/section filter above input */
+    .scope-bar {
+      display: none; gap: 8px; align-items: center; flex-wrap: wrap;
+      margin: 0 14px 6px;
+      padding: 7px 11px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 0.78rem;
+    }
+    .scope-bar.show { display: flex; }
+    .scope-bar-label {
+      font-weight: 700; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.06em; font-size: 0.7rem; margin-right: 2px;
+    }
+    .scope-select {
+      background: var(--bg); border: 1px solid var(--border-mid);
+      border-radius: 7px; padding: 4px 9px;
+      color: var(--text); font-size: 0.78rem; font-family: inherit;
+      cursor: pointer; outline: none; transition: border-color 0.12s;
+      max-width: 180px;
+    }
+    .scope-select:hover, .scope-select:focus { border-color: var(--accent); }
+    .scope-select.active { border-color: var(--accent); color: var(--accent); font-weight: 600; background: var(--accent-dim); }
+    .scope-clear-btn {
+      margin-left: auto; padding: 3px 9px; border-radius: 6px;
+      background: none; border: 1px solid var(--border-mid);
+      color: var(--muted); font-size: 0.72rem; cursor: pointer;
+      transition: all 0.12s;
+    }
+    .scope-clear-btn:hover { color: var(--error); border-color: var(--error); }
+    .scope-help {
+      font-size: 0.7rem; color: var(--muted2); cursor: help;
+      border: 1px solid var(--border-mid); border-radius: 50%;
+      width: 16px; height: 16px; display: inline-flex;
+      align-items: center; justify-content: center;
+    }
+
     .metric-hints-bar {
       display: none; align-items: center; gap: 6px; flex-wrap: wrap;
       padding: 6px 14px 0; font-size: 0.79rem;
@@ -1977,6 +2015,18 @@
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2" style="flex-shrink:0"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
       <span class="excel-attach-name" id="excel-attach-name">file.xlsx</span>
       <button class="excel-attach-remove" onclick="removeExcelAttachment()" title="Remove file">×</button>
+    </div>
+    <!-- Scope bar — quick sheet/section filter -->
+    <div class="scope-bar" id="scope-bar">
+      <span class="scope-bar-label">Scope</span>
+      <select class="scope-select" id="scope-sheet" onchange="onScopeSheetChange()">
+        <option value="">📋 All sheets</option>
+      </select>
+      <select class="scope-select" id="scope-section" onchange="onScopeSectionChange()" disabled>
+        <option value="">🎯 All sections</option>
+      </select>
+      <span class="scope-help" title="Limit the AI's search to a specific sheet and sub-section. Useful when the same metric name appears in multiple places.">?</span>
+      <button class="scope-clear-btn" id="scope-clear-btn" onclick="clearScope()" style="display:none">Clear scope</button>
     </div>
     <!-- Metric hints strip (shown when metrics are pinned) -->
     <div class="metric-hints-bar" id="metric-hints-bar">
@@ -2955,8 +3005,109 @@
     if (!activeSessionId) return;
     try {
       const r = await fetch(`${API}/api/v1/sessions/${activeSessionId}/field-map`);
-      if (r.ok) _fieldMap = await r.json();
+      if (r.ok) {
+        _fieldMap = await r.json();
+        _populateScopeBar();
+      }
     } catch (_) {}
+  }
+
+  // ── Scope bar (sheet + section quick filter) ─────────────
+  let _scopeSheet   = '';   // sheet_key currently scoped to (empty = all)
+  let _scopeSection = '';   // section name currently scoped to (empty = all)
+
+  function _populateScopeBar() {
+    const bar = document.getElementById('scope-bar');
+    const sheetSel = document.getElementById('scope-sheet');
+    if (!_fieldMap || !(_fieldMap.sheets || []).length) {
+      bar.classList.remove('show');
+      return;
+    }
+    bar.classList.toggle('show', _activeMode === 'excel' && !!activeSessionId);
+    // Build sheet options
+    sheetSel.innerHTML = '<option value="">📋 All sheets</option>' +
+      _fieldMap.sheets.map(s => {
+        const dup = (s.duplicate_labels || []).length;
+        return `<option value="${_esc(s.sheet_key)}">${_esc(s.display_name)}${dup ? ` (⚠ ${dup})` : ''}</option>`;
+      }).join('');
+    sheetSel.value = _scopeSheet;
+    _refreshSectionSelect();
+  }
+
+  function _refreshSectionSelect() {
+    const sectionSel = document.getElementById('scope-section');
+    const sheet = (_fieldMap?.sheets || []).find(s => s.sheet_key === _scopeSheet);
+    if (!sheet) {
+      sectionSel.innerHTML = '<option value="">🎯 All sections</option>';
+      sectionSel.disabled = true;
+      sectionSel.classList.remove('active');
+      return;
+    }
+    const sections = (sheet.sections || []).map(sec => sec.section).filter(Boolean);
+    const unique = [...new Set(sections)];
+    sectionSel.innerHTML = '<option value="">🎯 All sections</option>' +
+      unique.map(s => `<option value="${_esc(s)}">${_esc(s)}</option>`).join('');
+    sectionSel.value = _scopeSection;
+    sectionSel.disabled = unique.length === 0;
+    sectionSel.classList.toggle('active', !!_scopeSection);
+  }
+
+  function _updateScopeClearBtn() {
+    const btn = document.getElementById('scope-clear-btn');
+    btn.style.display = (_scopeSheet || _scopeSection) ? '' : 'none';
+    document.getElementById('scope-sheet').classList.toggle('active', !!_scopeSheet);
+    document.getElementById('scope-section').classList.toggle('active', !!_scopeSection);
+  }
+
+  function _commitScopeAsHints() {
+    // Convert active scope into metric_hints so the backend gets a clear signal.
+    if (!_scopeSheet && !_scopeSection) {
+      _metricHints = _metricHints.filter(h => !h._fromScope);
+      _renderHintChips();
+      return;
+    }
+    const sheet = (_fieldMap?.sheets || []).find(s => s.sheet_key === _scopeSheet);
+    if (!sheet) return;
+    // Remove old scope-derived hints
+    _metricHints = _metricHints.filter(h => !h._fromScope);
+    // Add new hints from every metric matching the scope
+    const newHints = [];
+    (sheet.sections || []).forEach(sec => {
+      if (_scopeSection && sec.section !== _scopeSection) return;
+      (sec.metrics || []).forEach(m => {
+        newHints.push({
+          sheet: sheet.sheet_key,
+          code: m.code || m.label,
+          label: m.label,
+          section: sec.section || null,
+          _fromScope: true,
+        });
+      });
+    });
+    _metricHints = _metricHints.concat(newHints);
+    _renderHintChips();
+  }
+
+  function onScopeSheetChange() {
+    _scopeSheet = document.getElementById('scope-sheet').value;
+    _scopeSection = '';
+    _refreshSectionSelect();
+    _updateScopeClearBtn();
+    _commitScopeAsHints();
+  }
+
+  function onScopeSectionChange() {
+    _scopeSection = document.getElementById('scope-section').value;
+    _updateScopeClearBtn();
+    _commitScopeAsHints();
+  }
+
+  function clearScope() {
+    _scopeSheet = ''; _scopeSection = '';
+    document.getElementById('scope-sheet').value = '';
+    _refreshSectionSelect();
+    _updateScopeClearBtn();
+    _commitScopeAsHints();
   }
 
   function openFieldPicker() {
@@ -3109,17 +3260,22 @@
     const fieldsBtn = document.getElementById('fields-btn');
     const isExcel  = _activeMode === 'excel';
 
+    const scopeBar = document.getElementById('scope-bar');
+
     if (activeSessionId && isExcel) {
       const lbl = activeSessionFiles.length === 1 ? activeSessionFiles[0] : `${activeSessionFiles.length} files`;
       if (sub) sub.textContent = `File session: ${lbl}`;
       endBtn.classList.add('visible');
       if (fieldsBtn) fieldsBtn.classList.add('visible');
+      if (scopeBar && _fieldMap) scopeBar.classList.add('show');
     } else {
       if (sub) sub.textContent = isExcel ? 'TBG Excel — no file' : 'Powered by Digiwise';
       endBtn.classList.remove('visible');
       if (fieldsBtn) fieldsBtn.classList.remove('visible');
+      if (scopeBar) scopeBar.classList.remove('show');
       if (!activeSessionId) {
         _metricHints = []; _pickerSelected = {}; _fieldMap = null; _renderHintChips();
+        _scopeSheet = ''; _scopeSection = '';
       }
     }
   }
