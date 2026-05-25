@@ -234,17 +234,30 @@ Rules:
 """
 
 
+def _make_chat_model(model: str | None = None) -> ChatOllama:
+    """Create a ChatOllama instance (proper Runnable) for use with create_react_agent."""
+    from app.config.settings import request_api_key
+    resolved = model or settings.OLLAMA_MODEL
+    api_key  = request_api_key.get() or settings.OLLAMA_API_KEY
+    kwargs: dict = {"model": resolved, "base_url": settings.OLLAMA_BASE_URL}
+    if api_key:
+        kwargs["client_kwargs"] = {"headers": {"Authorization": f"Bearer {api_key}"}}
+    return ChatOllama(**kwargs)
+
+
 def get_or_create_graph(session_id: str, parsed_data: dict, model: str | None = None):
-    key = f"{session_id}:{model or settings.OLLAMA_MODEL}"
+    from app.config.settings import request_api_key
+    api_key = request_api_key.get() or settings.OLLAMA_API_KEY
+    key = f"{session_id}:{model or settings.OLLAMA_MODEL}:{api_key}"
     if key in _graph_cache:
         return _graph_cache[key]
     thresholds = _load_thresholds()
     tools      = build_tools(parsed_data, thresholds)
-    llm        = _make_llm(model)
+    chat_model = _make_chat_model(model)
     graph = create_react_agent(
-        model=llm,
+        model=chat_model,
         tools=tools,
-        prompt=SystemMessage(content=_build_system_prompt(parsed_data)),
+        prompt=_build_system_prompt(parsed_data),
         checkpointer=MemorySaver(),
     )
     _graph_cache[key] = graph
