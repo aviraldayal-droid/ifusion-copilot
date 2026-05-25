@@ -1644,6 +1644,36 @@
     }
     .fp-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
     .fp-tab:hover:not(.active) { color: var(--text); }
+    .fp-conflict-banner {
+      margin: 0 0 12px;
+      padding: 10px 14px;
+      background: rgba(251,146,60,0.1);
+      border: 1px solid rgba(251,146,60,0.35);
+      border-radius: 8px;
+      font-size: 0.78rem;
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .fp-conflict-banner strong { color: #f97316; }
+    .fp-noconflict-banner {
+      margin: 0 0 12px;
+      padding: 10px 14px;
+      background: rgba(34,197,94,0.08);
+      border: 1px solid rgba(34,197,94,0.25);
+      border-radius: 8px;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .fp-metric-section-tag {
+      display: inline-block;
+      font-size: 0.68rem;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: rgba(251,146,60,0.15);
+      color: #f97316;
+      margin-top: 2px;
+    }
     .fp-dup-badge {
       background: rgba(249,115,22,0.14); color: var(--accent);
       border-radius: 10px; padding: 1px 6px; font-size: 0.68rem; margin-left: 4px;
@@ -2135,7 +2165,7 @@
     <div class="fp-header">
       <div>
         <div class="fp-title">Pin Specific Fields</div>
-        <div class="fp-subtitle">Select the exact metrics you want the AI to focus on — helpful when the same label appears in multiple sub-sections.</div>
+        <div class="fp-subtitle">Tabs marked <strong style="color:#f97316">⚠ conflicts</strong> have metrics with the same name in different sub-sections — select the right one so the AI doesn't guess.</div>
       </div>
       <button class="fp-close" onclick="closeFieldPicker()">✕</button>
     </div>
@@ -2846,7 +2876,7 @@
       const hasDup = sheet.duplicate_labels && sheet.duplicate_labels.length > 0;
       const tab = document.createElement('div');
       tab.className = 'fp-tab' + (sheet.sheet_key === _activeFpTab ? ' active' : '');
-      tab.innerHTML = sheet.display_name + (hasDup ? `<span class="fp-dup-badge">${sheet.duplicate_labels.length} dup</span>` : '');
+      tab.innerHTML = sheet.display_name + (hasDup ? `<span class="fp-dup-badge">⚠ ${sheet.duplicate_labels.length} conflict${sheet.duplicate_labels.length > 1 ? 's' : ''}</span>` : '');
       tab.onclick = () => { _activeFpTab = sheet.sheet_key; _renderFpTabs(); };
       tabsEl.appendChild(tab);
     });
@@ -2858,7 +2888,18 @@
   function _renderFpBody(sheet) {
     const body = document.getElementById('fp-body');
     const dupSet = new Set(sheet.duplicate_labels || []);
+    const hasDup = dupSet.size > 0;
     let html = '';
+
+    if (hasDup) {
+      html += `<div class="fp-conflict-banner">
+        <strong>⚠ ${dupSet.size} metric${dupSet.size > 1 ? 's' : ''} share the same name across different sub-sections.</strong><br>
+        Select the exact sub-section you want the AI to use — otherwise it may pick the wrong one.
+      </div>`;
+    } else {
+      html += `<div class="fp-noconflict-banner">✓ All metric names in this sheet are unique — no selection needed unless you want to narrow the focus.</div>`;
+    }
+
     (sheet.sections || []).forEach(sec => {
       html += `<div class="fp-section">
         <div class="fp-section-header">${_esc(sec.section)}</div>
@@ -2867,12 +2908,14 @@
         const key = `${sheet.sheet_key}:${m.code || m.label}`;
         const sel = !!_pickerSelected[key];
         const isDup = dupSet.has(m.label);
+        const sectionTag = isDup && sec.section ? `<div><span class="fp-metric-section-tag">Section: ${_esc(sec.section)}</span></div>` : '';
         html += `<div class="fp-metric-row${sel ? ' selected' : ''}" onclick="_togglePickerMetric('${_esc(sheet.sheet_key)}','${_esc(m.code || '')}','${_esc(m.label)}','${_esc(sec.section || '')}',this)">
           <div class="fp-metric-check">
             <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#fff" stroke-width="2.2"><polyline points="1.5,6 5,9.5 10.5,2.5"/></svg>
           </div>
           <div class="fp-metric-info">
-            <div class="fp-metric-name">${_esc(m.label)}${isDup ? '<span class="fp-metric-dup">· duplicate</span>' : ''}</div>
+            <div class="fp-metric-name">${isDup ? '⚠ ' : ''}${_esc(m.label)}</div>
+            ${sectionTag}
             <div class="fp-metric-code">${m.code ? m.code : '—'}</div>
           </div>
         </div>`;
