@@ -479,10 +479,9 @@ async def db_chat(
     Use conversation_id to maintain multi-turn history.
     When authenticated, messages are persisted to the database.
     """
-    from app.config.settings import request_api_key, settings as _s
+    from app.config.settings import request_api_key
     per_user_key = http_request.headers.get("X-Ollama-Api-Key", "").strip()
-    effective_key = per_user_key or _s.OLLAMA_API_KEY
-    if not effective_key:
+    if not per_user_key:
         raise HTTPException(status_code=403, detail="NO_API_KEY")
     _token = request_api_key.set(per_user_key)
 
@@ -609,10 +608,9 @@ async def db_chat_stream(
     """
     import json as _json
 
-    from app.config.settings import request_api_key, settings as _s
+    from app.config.settings import request_api_key
     per_user_key = http_request.headers.get("X-Ollama-Api-Key", "").strip()
-    effective_key = per_user_key or _s.OLLAMA_API_KEY
-    if not effective_key:
+    if not per_user_key:
         raise HTTPException(status_code=403, detail="NO_API_KEY")
     request_api_key.set(per_user_key)
 
