@@ -2187,9 +2187,13 @@
   function authHeaders() {
     const h = { 'Content-Type': 'application/json' };
     if (_authToken) h['Authorization'] = 'Bearer ' + _authToken;
-    const apiKey = localStorage.getItem('ollama_api_key');
+    const apiKey = localStorage.getItem(_ollamaKeyStorageKey());
     if (apiKey) h['X-Ollama-Api-Key'] = apiKey;
     return h;
+  }
+
+  function _ollamaKeyStorageKey() {
+    return 'ollama_api_key_' + (_authUser?.id || 'anon');
   }
 
   function _setAuth(token, user) {
@@ -2197,6 +2201,7 @@
     _authUser  = user;
     if (token) { localStorage.setItem('tbg_token', token); } else { localStorage.removeItem('tbg_token'); }
     if (user)  { localStorage.setItem('tbg_user',  JSON.stringify(user)); } else { localStorage.removeItem('tbg_user'); }
+    checkApiKeyStatus();
   }
 
   function _updateUserUI() {
@@ -4803,7 +4808,7 @@
   }
 
   function checkApiKeyStatus() {
-    const key = localStorage.getItem('ollama_api_key') || '';
+    const key = localStorage.getItem(_ollamaKeyStorageKey()) || '';
     _setApiKeyRequired(!key);
   }
 
@@ -4828,9 +4833,9 @@
     const key    = document.getElementById('ollama-api-key-input').value.trim();
     const status = document.getElementById('settings-status');
     if (key) {
-      localStorage.setItem('ollama_api_key', key);
+      localStorage.setItem(_ollamaKeyStorageKey(), key);
     } else {
-      localStorage.removeItem('ollama_api_key');
+      localStorage.removeItem(_ollamaKeyStorageKey());
     }
     status.style.color = 'var(--accent)';
     status.textContent = key ? 'API key saved ✓' : 'API key cleared ✓';
