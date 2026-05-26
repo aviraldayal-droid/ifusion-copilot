@@ -358,6 +358,41 @@ End with 1–2 bullets:
 """
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Ollama API key validation (used before cache hits to fail fast on bad keys)
+# ──────────────────────────────────────────────────────────────────────────
+_key_validation_cache: dict[str, tuple[float, bool]] = {}
+_KEY_VALIDATION_TTL = 60.0  # seconds
+
+
+def validate_ollama_api_key(api_key: str) -> bool:
+    """Cheap auth check against Ollama. Returns False ONLY on clear 401/unauthorized.
+    Returns True on success OR transient errors (network, timeout) — we don't want to
+    block users when Ollama is flaky; the real call will surface real failures."""
+    if not api_key:
+        return False
+    now = time.time()
+    cached = _key_validation_cache.get(api_key)
+    if cached and (now - cached[0]) < _KEY_VALIDATION_TTL:
+        return cached[1]
+    try:
+        client = Client(
+            host=settings.OLLAMA_BASE_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        client.list()
+        _key_validation_cache[api_key] = (now, True)
+        return True
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "401" in msg or "unauthorized" in msg or "invalid api key" in msg:
+            _key_validation_cache[api_key] = (now, False)
+            return False
+        # Transient — give benefit of the doubt, let the real call surface real errors
+        return True
+
+
 def _make_chat_model(model: str | None = None) -> ChatOllama:
     """Create a ChatOllama instance (proper Runnable) for use with create_react_agent."""
     from app.config.settings import request_api_key
@@ -3349,6 +3384,12 @@ async def run_db_agent(
     q_embedding = await asyncio.to_thread(embed_text, message)
     cached = semantic_cache.get(message, q_embedding)
     if cached is not None:
+            # Validate the API key BEFORE serving a cached answer — otherwise users
+            # with a revoked / wrong key would receive someone else's previous answer.
+            from app.config.settings import request_api_key as _rk
+            current_key = _rk.get() or settings.OLLAMA_API_KEY
+            if not validate_ollama_api_key(current_key):
+                raise RuntimeError("Ollama API call failed: unauthorized (status code: 401)")
             cached_answer = cached["answer"]
             if definition_prefix:
                 cached_answer = definition_prefix + "\n\n---\n\n" + cached_answer
@@ -3460,6 +3501,13 @@ async def run_db_agent_stream(
     q_embedding = await asyncio.to_thread(embed_text, message)
     cached = semantic_cache.get(message, q_embedding)
     if cached is not None:
+            # Validate the API key BEFORE serving a cached answer — prevents users
+            # with a revoked / wrong key from receiving someone else's previous answer.
+            from app.config.settings import request_api_key as _rk
+            current_key = _rk.get() or settings.OLLAMA_API_KEY
+            if not await asyncio.to_thread(validate_ollama_api_key, current_key):
+                yield _sse("error", {"detail": "Ollama API call failed: unauthorized (status code: 401)"})
+                return
             yield _sse("progress", {"message": "Cache hit — returning cached result", "step": "cache"})
             cached_answer = cached["answer"]
             yield _sse("token", {"text": cached_answer})
