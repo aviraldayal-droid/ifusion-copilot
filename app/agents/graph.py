@@ -269,6 +269,35 @@ Available periods: {period_range}
 - For percentages: always show the sign (+/- e.g. "+12.4%" or "-8.1%").
 - If metric_hints are provided, use ONLY those metrics — do not search other sheets.
 
+# SCOPE GUARD — CRITICAL RULE (must follow exactly)
+
+You are a SPECIALIZED financial analyst for the Moov Benin TBG workbook ONLY.
+You MUST refuse any question that is not about:
+  • Metrics, sheets, periods, sub-sections inside the uploaded TBG workbook
+  • Financial / telecom KPIs (revenue, CAPEX, EBITDA, ARPU, parc, churn, traffic, etc.)
+  • How to use this Copilot (capabilities, features, how to ask)
+  • Greetings and small talk (respond briefly and steer back to TBG)
+
+Examples of questions you MUST refuse:
+  • "What is the capital of India?"  → off-topic (geography)
+  • "Write me a poem"                → off-topic (creative writing)
+  • "Who is the president of France?" → off-topic (politics)
+  • "Translate this to Spanish"       → off-topic (translation)
+  • "Explain quantum physics"         → off-topic (general knowledge)
+
+For off-topic questions, do NOT call any tool. Respond with EXACTLY this template (one short paragraph, no other content):
+
+```
+I can only help with questions about the TBG (Tableau de Bord de Gestion) workbook for Moov Benin — financial metrics, variance analysis, charts, and KPIs. Your question is outside that scope.
+
+Try asking something like:
+  • "What is December 2025 revenue vs budget?"
+  • "Show the EBITDA trend for 2025"
+  • "Which OPEX categories overshot the plan?"
+```
+
+If the question is ambiguous (e.g. "What is EBITDA?"), treat it as a request for the value from this workbook (call query_metric for EBITDA) — NOT as a general definition. Only define a term if the user explicitly asks "what does X mean" or "define X".
+
 # AMBIGUITY HANDLING — CRITICAL RULE (must follow exactly)
 
 Below is the AUTHORITATIVE list of ambiguous labels and their sub-sections in this workbook:
@@ -2901,6 +2930,12 @@ English examples:
   "Show me monthly revenue for 2025"                        → data_query
   "What is EBITDA and what was it in 2024?"                 → both
   "Hello, how are you?"                                     → other
+  "What is the capital of India?"                           → other
+  "Who is the president of France?"                         → other
+  "Write me a poem"                                         → other
+  "Translate this to Spanish"                               → other
+  "Explain quantum physics"                                 → other
+  "What's the weather today?"                               → other
   "Which decree triggered the variance in Redevances?"      → out_of_scope
   "What tax law caused the OPEX increase?"                  → out_of_scope
   "Which regulatory amendment changed the fee structure?"   → out_of_scope
@@ -2913,6 +2948,12 @@ French examples:
   "Quel décret a causé la variance des redevances ?"        → out_of_scope
   "Quelle ordonnance fiscale a modifié les charges ?"       → out_of_scope
   "Bonjour, comment ça va ?"                                → other
+  "Quelle est la capitale de l'Inde ?"                      → other
+  "Écris-moi un poème"                                      → other
+
+GUIDING RULE: if the question is about anything other than Moov Benin's financial
+metrics, KPIs, regulatory/legal context, or telecom operations, classify it as
+`other` (general knowledge, greetings, creative tasks, translations, etc.).
 
 Respond with ONLY one word — the label itself. No punctuation, no explanation.
 
@@ -2938,6 +2979,26 @@ To identify the specific regulatory trigger, consult:
 Would you like me to pull the Redevances régulateur data so you can cross-reference it with the regulation timeline?
 """
 
+_OFF_TOPIC_TEMPLATE_EN = """\
+I can only help with questions about Moov Benin's financial data — TBG metrics, revenue, CAPEX, OPEX, EBITDA, subscribers, traffic, and related KPIs. Your question is outside that scope.
+
+Try one of these instead:
+- "What is December 2025 revenue vs budget?"
+- "Show the EBITDA trend for 2025"
+- "Which OPEX categories overshot the plan?"
+- "Compare prepaid vs postpaid activations"
+"""
+
+_OFF_TOPIC_TEMPLATE_FR = """\
+Je peux uniquement répondre aux questions portant sur les données financières de Moov Bénin — métriques TBG, chiffre d'affaires, CAPEX, OPEX, EBITDA, parc, trafic et KPIs associés. Votre question est hors de ce périmètre.
+
+Essayez plutôt :
+- « Quel est le chiffre d'affaires de décembre 2025 vs budget ? »
+- « Montre la tendance de l'EBITDA pour 2025 »
+- « Quelles catégories OPEX ont dépassé le plan ? »
+- « Compare les activations prépayées et postpayées »
+"""
+
 _OUT_OF_SCOPE_TEMPLATE_FR = """\
 Cette question porte sur des informations réglementaires ou juridiques externes (décrets, ordonnances fiscales, amendements) qui ne sont pas stockées dans cette base de données.
 
@@ -2955,6 +3016,39 @@ Pour identifier le déclencheur réglementaire précis, consultez :
 
 Souhaitez-vous que je récupère les données Redevances régulateur pour les croiser avec la chronologie réglementaire ?
 """
+
+
+def _get_off_topic_answer(language: str = "en") -> str:
+    """Return a clear refusal for questions completely outside the TBG/financial scope."""
+    if language == "fr":
+        return _OFF_TOPIC_TEMPLATE_FR
+    return _OFF_TOPIC_TEMPLATE_EN
+
+
+_GREETING_PATTERNS = (
+    "hello", "hi ", "hi!", "hey", "bonjour", "salut", "good morning", "good evening",
+    "good afternoon", "thanks", "thank you", "merci", "bye", "goodbye", "au revoir",
+)
+
+
+def _is_greeting(question: str) -> bool:
+    q = question.strip().lower()
+    if len(q) > 60:
+        return False
+    return any(q.startswith(p) or q == p.strip() for p in _GREETING_PATTERNS)
+
+
+def _get_greeting_answer(language: str = "en") -> str:
+    if language == "fr":
+        return (
+            "Bonjour ! Je suis l'iFusion Copilot, votre assistant pour le tableau de bord financier "
+            "de Moov Bénin. Posez-moi une question sur le chiffre d'affaires, l'EBITDA, le parc mobile, "
+            "le CAPEX ou tout autre KPI."
+        )
+    return (
+        "Hello! I'm the iFusion Copilot, your assistant for Moov Benin's financial dashboard. "
+        "Ask me about revenue, EBITDA, mobile subscribers, CAPEX, or any other KPI from the TBG workbook."
+    )
 
 
 def _get_out_of_scope_answer(question: str, language: str = "en") -> str:
@@ -3236,6 +3330,14 @@ async def run_db_agent(
         inference_time = round(time.monotonic() - t_start, 2)
         return {"answer": answer, "charts": [], "inference_time": inference_time}
 
+    if classification == "other":
+        answer = _get_greeting_answer(language=language) if _is_greeting(message) else _get_off_topic_answer(language=language)
+        log.info("Off-topic / greeting question detected — returning refusal")
+        history_turns.append(f"Q: {message}\nA: {answer}")
+        _conversation_history[thread_id] = history_turns
+        inference_time = round(time.monotonic() - t_start, 2)
+        return {"answer": answer, "charts": [], "inference_time": inference_time}
+
     definition_prefix = ""
     if classification == "both":
         log.info("Combined question detected — answering definition then querying data")
@@ -3399,6 +3501,16 @@ async def run_db_agent_stream(
     if classification == "out_of_scope":
         yield _sse("progress", {"message": "Checking scope…", "step": "scope"})
         full_answer = _get_out_of_scope_answer(message, language=language)
+        yield _sse("token", {"text": full_answer})
+        history_turns.append(f"Q: {message}\nA: {full_answer}")
+        _conversation_history[thread_id] = history_turns
+        inference_time = round(time.monotonic() - t_start, 2)
+        yield _sse("done", {"inference_time": inference_time, "charts": []})
+        return
+
+    if classification == "other":
+        yield _sse("progress", {"message": "Checking scope…", "step": "scope"})
+        full_answer = _get_greeting_answer(language=language) if _is_greeting(message) else _get_off_topic_answer(language=language)
         yield _sse("token", {"text": full_answer})
         history_turns.append(f"Q: {message}\nA: {full_answer}")
         _conversation_history[thread_id] = history_turns
