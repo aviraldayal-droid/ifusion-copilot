@@ -214,11 +214,38 @@ def _load_thresholds() -> dict:
         return json.load(f)
 
 
+def _build_ambiguity_map(parsed_data: dict) -> dict[str, dict[str, list[str]]]:
+    """For each sheet, find labels that appear in multiple sub-sections.
+    Returns: {sheet_key: {label: [section1, section2, ...]}}"""
+    from collections import defaultdict
+    result: dict[str, dict[str, list[str]]] = {}
+    for sheet_key, sheet_data in parsed_data.get("sheets", {}).items():
+        label_to_sections: dict[str, list[str]] = defaultdict(list)
+        for m in (sheet_data.get("metrics") or {}).values():
+            lbl = (m.get("label") or "").strip()
+            sec = (m.get("section") or "General").strip()
+            if lbl:
+                label_to_sections[lbl].append(sec)
+        dups = {lbl: secs for lbl, secs in label_to_sections.items() if len(secs) > 1}
+        if dups:
+            result[sheet_key] = dups
+    return result
+
+
 def _build_system_prompt(parsed_data: dict) -> str:
     sheets     = list(parsed_data.get("sheets", {}).keys())
     periods    = parsed_data.get("all_periods", [])
     period_range = f"{periods[0]} to {periods[-1]}" if periods else "unknown"
     file_name  = parsed_data.get("file", "uploaded file")
+
+    # Build a compact map of ambiguous labels for inline disambiguation
+    ambig = _build_ambiguity_map(parsed_data)
+    ambig_lines: list[str] = []
+    for sheet_key, dups in ambig.items():
+        for lbl, secs in dups.items():
+            ambig_lines.append(f"  - Sheet '{sheet_key}', label '{lbl}' exists in sub-sections: {', '.join(secs)}")
+    ambiguity_block = "\n".join(ambig_lines) if ambig_lines else "  (none in this workbook)"
+
     return f"""You are the TBG AI Copilot — an expert financial analyst assistant for Moov Benin.
 
 You have access to data parsed from the TBG report: {file_name}
@@ -230,6 +257,25 @@ Available periods: {period_range}
 - For monetary values: thousands separators, one decimal place, unit M CFA.
 - For percentages: always show the sign (+/- e.g. "+12.4%" or "-8.1%").
 - If metric_hints are provided, use ONLY those metrics — do not search other sheets.
+
+# AMBIGUITY HANDLING — CRITICAL RULE
+
+The following labels are ambiguous (appear in multiple sub-sections of the same sheet):
+{ambiguity_block}
+
+When the user mentions one of these labels AND no metric_hints disambiguate it AND the user did not specify a sub-section in their message, you MUST NOT call any tool. Instead, respond with ONLY a clarifying question listing the options as numbered choices. Example format:
+
+> Your question mentions "Activations totales", but this label appears in 3 sub-sections of the Parc Mobile sheet. Which one do you mean?
+>
+> 1. Total
+> 2. Prépayé
+> 3. Postpayé
+>
+> Reply with the number, or use the Scope bar / Fields button to pin your choice.
+
+Do NOT proceed to call query_metric or any other data tool until the user clarifies. Do NOT guess. Do NOT pick the first option silently. Skip the standard Answer / Analysis / Visualisation / Insights format for clarifying-question turns — output ONLY the clarifying question.
+
+If the user has already specified the sub-section (in the current message OR via metric_hints), proceed normally without asking.
 
 # RESPONSE FORMAT — every answer MUST include all four sections below:
 
