@@ -3947,40 +3947,88 @@
   }
 
   // Detect clarifying-question lists in the bot reply and render numbered
-  // chips the user can click instead of typing a number.
+  // chips the user can click instead of typing the option.
   function _renderClarifyChips(bubble, content) {
     if (!content || typeof content !== 'string') return;
     const lower = content.toLowerCase();
-    // Trigger only when the response is clearly a clarifying question
-    if (!(lower.includes('which one') || lower.includes('which do you mean') ||
-          lower.includes('quel(le) voulez') || lower.includes('lequel') ||
-          lower.includes('laquelle') || lower.includes('which sub-section'))) return;
-    // Find lines matching "1. ..." / "2. ..." that come after the question
+    // Trigger only when the response is clearly a clarifying question.
+    const triggerPhrases = [
+      'which one do you mean', 'which one', 'which do you mean',
+      'which sub-section', 'which sub section',
+      'lequel', 'laquelle', 'quel(le) voulez', 'que voulez-vous',
+      'reply with the number', 'reply with one of',
+    ];
+    const hasTrigger = triggerPhrases.some(p => lower.includes(p));
+    if (!hasTrigger) return;
+
+    // Find the question line, then collect following non-empty short lines
+    // as candidate options. Strip leading numbers / bullets if present.
     const lines = content.split(/\r?\n/);
-    const options = [];
-    for (const line of lines) {
-      const m = line.match(/^\s*(\d{1,2})[\.\)]\s+(.{2,200})$/);
-      if (m) options.push({ num: parseInt(m[1], 10), text: m[2].trim() });
+    let questionIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i].toLowerCase();
+      if (l.includes('which') || l.includes('lequel') || l.includes('laquelle')) {
+        if (l.trim().endsWith('?')) { questionIdx = i; break; }
+      }
     }
-    // Need at least two numbered options to be a clarifying list
-    if (options.length < 2) return;
-    // Sort by number and dedupe
-    options.sort((a, b) => a.num - b.num);
+    if (questionIdx === -1) {
+      // Fall back: first line containing any trigger phrase
+      for (let i = 0; i < lines.length; i++) {
+        if (triggerPhrases.some(p => lines[i].toLowerCase().includes(p))) { questionIdx = i; break; }
+      }
+    }
+    if (questionIdx === -1) return;
+
+    const options = [];
+    for (let i = questionIdx + 1; i < lines.length; i++) {
+      const raw = lines[i];
+      const trimmed = raw.trim();
+      if (!trimmed) {
+        // Empty line — keep going if we haven't collected anything yet,
+        // otherwise stop (the list has ended).
+        if (options.length > 0) break;
+        continue;
+      }
+      // Stop if we hit a sentence/instruction (long line, ends with full stop)
+      if (trimmed.length > 110 || /\.$/.test(trimmed)) {
+        if (options.length > 0) break;
+        else continue;
+      }
+      // Strip leading number/bullet markers
+      const cleaned = trimmed
+        .replace(/^\s*[-•*]\s+/, '')
+        .replace(/^\s*\(?\d{1,2}[\.\)]\s+/, '')
+        .trim();
+      if (cleaned.length >= 2 && cleaned.length <= 110) {
+        options.push(cleaned);
+      } else {
+        if (options.length > 0) break;
+      }
+    }
+
+    // De-duplicate while preserving order
+    const seen = new Set();
+    const uniqueOptions = options.filter(o => {
+      const key = o.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    if (uniqueOptions.length < 2) return;
+
     // Render chips
     const wrap = document.createElement('div');
     wrap.className = 'clarify-options';
-    options.forEach(opt => {
+    uniqueOptions.forEach((text, idx) => {
       const btn = document.createElement('button');
       btn.className = 'clarify-chip';
-      btn.innerHTML = `<span class="clarify-chip-num">${opt.num}</span><span>${escHtml(opt.text)}</span>`;
+      btn.innerHTML = `<span class="clarify-chip-num">${idx + 1}</span><span>${escHtml(text)}</span>`;
       btn.onclick = () => {
-        // Disable all chips in this group once one is picked
         wrap.querySelectorAll('.clarify-chip').forEach(c => c.disabled = true);
         btn.style.borderColor = 'var(--accent)';
         btn.style.background = 'var(--accent-dim)';
-        // Send the option text as the next user message
         const ta = document.getElementById('user-input');
-        ta.value = opt.text;
+        ta.value = text;
         ta.dispatchEvent(new Event('input'));
         sendMessage();
       };
