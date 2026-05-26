@@ -4213,6 +4213,8 @@
             }
             const bubble = streamBubble ? streamBubble.closest('.bubble') : null;
             if (bubble) renderVerifiedBadge(bubble, payload);
+            // Render clickable chips if the streamed answer is a clarifying question
+            if (bubble) _renderClarifyChips(bubble, streamBuffer);
             const timeEl = document.getElementById('stream-time');
             if (timeEl && payload.inference_time != null) timeEl.innerHTML = `${nowTime()}<span class="infer-time">· ${payload.inference_time}s</span>`;
 
