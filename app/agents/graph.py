@@ -223,7 +223,7 @@ def _build_ambiguity_map(parsed_data: dict) -> dict[str, dict[str, list[str]]]:
         label_to_sections: dict[str, list[str]] = defaultdict(list)
         for m in (sheet_data.get("metrics") or {}).values():
             lbl = (m.get("label") or "").strip()
-            sec = (m.get("section") or "General").strip()
+            sec = (m.get("section") or "").strip() or "Top-level (no sub-section)"
             if lbl:
                 label_to_sections[lbl].append(sec)
         dups = {lbl: secs for lbl, secs in label_to_sections.items() if len(secs) > 1}
@@ -238,12 +238,17 @@ def _build_system_prompt(parsed_data: dict) -> str:
     period_range = f"{periods[0]} to {periods[-1]}" if periods else "unknown"
     file_name  = parsed_data.get("file", "uploaded file")
 
-    # Build a compact map of ambiguous labels for inline disambiguation
+    # Build a structured map of ambiguous labels for inline disambiguation.
+    # Format as a strict reference table so the LLM cannot drop entries.
     ambig = _build_ambiguity_map(parsed_data)
     ambig_lines: list[str] = []
     for sheet_key, dups in ambig.items():
         for lbl, secs in dups.items():
-            ambig_lines.append(f"  - Sheet '{sheet_key}', label '{lbl}' exists in sub-sections: {', '.join(secs)}")
+            secs_numbered = "; ".join(f"({i+1}) {s}" for i, s in enumerate(secs))
+            ambig_lines.append(
+                f"  • LABEL: \"{lbl}\" | SHEET: {sheet_key} | COUNT: {len(secs)} | "
+                f"SUB-SECTIONS (list ALL of these verbatim when clarifying): {secs_numbered}"
+            )
     ambiguity_block = "\n".join(ambig_lines) if ambig_lines else "  (none in this workbook)"
 
     return f"""You are the TBG AI Copilot — an expert financial analyst assistant for Moov Benin.
@@ -258,24 +263,33 @@ Available periods: {period_range}
 - For percentages: always show the sign (+/- e.g. "+12.4%" or "-8.1%").
 - If metric_hints are provided, use ONLY those metrics — do not search other sheets.
 
-# AMBIGUITY HANDLING — CRITICAL RULE
+# AMBIGUITY HANDLING — CRITICAL RULE (must follow exactly)
 
-The following labels are ambiguous (appear in multiple sub-sections of the same sheet):
+Below is the AUTHORITATIVE list of ambiguous labels and their sub-sections in this workbook:
 {ambiguity_block}
 
-When the user mentions one of these labels AND no metric_hints disambiguate it AND the user did not specify a sub-section in their message, you MUST NOT call any tool. Instead, respond with ONLY a clarifying question listing the options as numbered choices. Example format:
+When the user mentions one of the labels above AND `metric_hints` is empty AND the user did not name a sub-section in their message, you MUST:
 
-> Your question mentions "Activations totales", but this label appears in 3 sub-sections of the Parc Mobile sheet. Which one do you mean?
->
-> 1. Total
-> 2. Prépayé
-> 3. Postpayé
->
-> Reply with the number, or use the Scope bar / Fields button to pin your choice.
+1. **NOT call any tool.** Stop reasoning, do not invoke query_metric or any other data tool.
+2. **Output ONLY a clarifying question** that copies the sub-section list VERBATIM and IN FULL from the reference above. Do NOT merge, summarise, rename, or omit any entry. The COUNT in your question must match the COUNT in the reference exactly.
+3. Use this exact template (replace the bracketed placeholders):
 
-Do NOT proceed to call query_metric or any other data tool until the user clarifies. Do NOT guess. Do NOT pick the first option silently. Skip the standard Answer / Analysis / Visualisation / Insights format for clarifying-question turns — output ONLY the clarifying question.
+```
+Your question mentions "[LABEL]", but this label appears in [COUNT] sub-sections of the [SHEET] sheet. Which one do you mean?
 
-If the user has already specified the sub-section (in the current message OR via metric_hints), proceed normally without asking.
+1. [SUB-SECTION 1 verbatim]
+2. [SUB-SECTION 2 verbatim]
+3. [SUB-SECTION 3 verbatim]
+…(continue numbering until you have listed ALL [COUNT] entries)
+
+Reply with the number, or use the Scope bar / Fields button to pin your choice.
+```
+
+4. Skip the standard Answer / Analysis / Visualisation / Insights format on clarifying-question turns.
+
+If the user has already specified the sub-section (named it in their message, or it is present in metric_hints, or the workbook only has one occurrence of the label), proceed normally and DO NOT ask the question.
+
+If your numbered list in the output has fewer entries than the COUNT shown in the reference table above, you are violating this rule — re-check the reference and re-list every entry.
 
 # RESPONSE FORMAT — every answer MUST include all four sections below:
 
