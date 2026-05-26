@@ -11,9 +11,66 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import openpyxl
+import yaml
+
+_SECTION_MAPPINGS_PATH = Path(__file__).parent / "section_mappings.yaml"
+_section_overrides_cache: dict[str, list[dict]] | None = None
+
+
+def _load_section_overrides() -> dict[str, list[dict]]:
+    """Load curated section→code-range overrides from YAML. Cached after first call."""
+    global _section_overrides_cache
+    if _section_overrides_cache is not None:
+        return _section_overrides_cache
+    try:
+        with open(_SECTION_MAPPINGS_PATH) as f:
+            _section_overrides_cache = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        _section_overrides_cache = {}
+    return _section_overrides_cache
+
+
+_CODE_SUFFIX_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
+
+
+def _split_code(code: str) -> tuple[str, int] | None:
+    """Split 'CA15' -> ('CA', 15). Returns None if code doesn't match the pattern."""
+    if not code:
+        return None
+    m = _CODE_SUFFIX_RE.match(code.strip())
+    if not m:
+        return None
+    return m.group(1).lower(), int(m.group(2))
+
+
+def _code_in_range(code: str, start: str, end: str) -> bool:
+    """True if `code` falls between `start` and `end` inclusive (same prefix, numeric compare)."""
+    c, s, e = _split_code(code), _split_code(start), _split_code(end)
+    if not (c and s and e):
+        return False
+    if c[0] != s[0] or c[0] != e[0]:
+        return False
+    return s[1] <= c[1] <= e[1]
+
+
+def _apply_section_overrides(sheet_key: str, metrics: dict) -> None:
+    """Overwrite the `section` field of each metric based on the YAML code-range map."""
+    overrides = _load_section_overrides().get(sheet_key)
+    if not overrides:
+        return
+    for metric in metrics.values():
+        code = metric.get("code") or ""
+        for entry in overrides:
+            rng = entry.get("range") or []
+            if len(rng) != 2:
+                continue
+            if _code_in_range(code, rng[0], rng[1]):
+                metric["section"] = entry["section"]
+                break
 
 SHEETS_OF_INTEREST: dict[str, str] = {
     "P&L conso": "pnl_conso",
@@ -223,6 +280,8 @@ def parse_tbg_file(file_path: str) -> dict:
         ws = wb[sheet_name]
         parsed = _parse_sheet(ws)
         if parsed:
+            # Apply curated section overrides (for sheets where heuristics fail)
+            _apply_section_overrides(sheet_key, parsed.get("metrics", {}))
             result["sheets"][sheet_key] = parsed
 
     wb.close()

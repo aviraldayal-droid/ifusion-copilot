@@ -215,7 +215,8 @@ def _load_thresholds() -> dict:
 
 
 def _build_ambiguity_map(parsed_data: dict) -> dict[str, dict[str, list[str]]]:
-    """For each sheet, find labels that appear in multiple sub-sections.
+    """For each sheet, find labels that appear in multiple DISTINCT sub-sections.
+    Same-section duplicates are not user-resolvable, so they are excluded.
     Returns: {sheet_key: {label: [section1, section2, ...]}}"""
     from collections import defaultdict
     result: dict[str, dict[str, list[str]]] = {}
@@ -226,7 +227,12 @@ def _build_ambiguity_map(parsed_data: dict) -> dict[str, dict[str, list[str]]]:
             sec = (m.get("section") or "").strip() or "Top-level (no sub-section)"
             if lbl:
                 label_to_sections[lbl].append(sec)
-        dups = {lbl: secs for lbl, secs in label_to_sections.items() if len(secs) > 1}
+        # Only flag labels that appear in 2+ DISTINCT sections (de-dup the section list)
+        dups: dict[str, list[str]] = {}
+        for lbl, secs in label_to_sections.items():
+            unique_secs = list(dict.fromkeys(secs))  # preserve order, drop duplicates
+            if len(unique_secs) > 1:
+                dups[lbl] = unique_secs
         if dups:
             result[sheet_key] = dups
     return result

@@ -1,0 +1,109 @@
+# Section overrides for sheets where the heuristic section detector fails.
+# Each entry: section name + inclusive code range [start, end].
+# Only listed sheets get overridden — others (Parc Mobile, Mobile Money) keep
+# their heuristic detection which works correctly today.
+#
+# Edit this file when next month's TBG file adds rows that fall outside a range
+# — run `python -m app.parsers.section_mappings_validate` to see flagged codes.
+
+pnl_conso:
+  - section: "Chiffre d'affaires"
+    range: [PL1, PL7]
+  - section: "Coût des ventes"
+    range: [PL9, PL12]
+  - section: "Marge Brute"
+    range: [PL14, PL17]
+  - section: "Coûts opérationnels"
+    range: [PL19, PL23]
+  - section: "EBITDA"
+    range: [PL25, PL28]
+  - section: "Amortissements & EBITA"
+    range: [PL30, PL38]
+  - section: "Résultat financier"
+    range: [PL41, PL42]
+  - section: "Résultat net"
+    range: [PL44, PL50]
+
+ca_mobile:
+  - section: "CA récurrent — Prépayé (Consumer)"
+    range: [CA10, CA45]
+  - section: "CA récurrent — Postpayé (vue d'ensemble)"
+    range: [CA46, CA50]
+  - section: "Trafic sortant — Consumer Postpaid"
+    range: [CA51, CA75]
+  - section: "Trafic sortant — Business Postpaid"
+    range: [CA77, CA100]
+  - section: "Trafic sortant — Business Prepaid"
+    range: [CA102, CA135]
+  - section: "Autres CA récurrent (Mobile Money, Liaisons, Internet)"
+    range: [CA136, CA140]
+  - section: "CA entrant — Opérateur national MTN"
+    range: [CA142, CA147]
+  - section: "CA entrant — Opérateur national GLO"
+    range: [CA148, CA152]
+  - section: "CA entrant — BTSA, BBCOM & LIBERCOM"
+    range: [CA153, CA157]
+  - section: "CA entrant — International"
+    range: [CA158, CA162]
+  - section: "CA non récurrent"
+    range: [CA164, CA175]
+
+opex_consolides:
+  - section: "Personnel"
+    range: [Opex3, Opex32]
+  - section: "Communication / Marketing"
+    range: [Opex34, Opex49]
+  - section: "Exploitation & maintenance"
+    range: [Opex51, Opex104]
+  - section: "Frais généraux"
+    range: [Opex107, Opex158]
+  - section: "Impôts, taxes et redevances"
+    range: [Opex161, Opex175]
+  - section: "Provisions clients"
+    range: [Opex178, Opex195]
+
+marge_mobile:
+  - section: "International"
+    range: [MB4, MB9]
+  - section: "Opérateur national MTN"
+    range: [MB10, MB12]
+  - section: "Opérateur national ORANGE"
+    range: [MB13, MB15]
+  - section: "Opérateur national AUTRES MOBILES"
+    range: [MB16, MB18]
+  - section: "Opérateur national 2 (GLO)"
+    range: [MB19, MB21]
+  - section: "Opérateur national 3 (BBCOM, LIBERCOM & BTSA)"
+    range: [MB22, MB30]
+  - section: "Interconnexion Fixe"
+    range: [MB31, MB32]
+  - section: "Achat de capacité, SMS, Roaming"
+    range: [MB33, MB36]
+  - section: "Coûts terminaux et cartes"
+    range: [MB38, MB44]
+  - section: "Commissions"
+    range: [MB45, MB49]
+  - section: "Totaux de marge (Coûts ventes, Marge Brute)"
+    range: [MB51, MB55]
+
+trafic_mobile:
+  - section: "Sortant prépayé (Consumer)"
+    range: [TRAF3, TRAF10]
+  - section: "Sortant postpayé — total"
+    range: [TRAF12, TRAF19]
+  - section: "Sortant postpayé — Consumer Postpaid"
+    range: [TRAF21, TRAF28]
+  - section: "Sortant postpayé — Business Postpaid"
+    range: [TRAF30, TRAF37]
+  - section: "Sortant postpayé — Business Prepaid"
+    range: [TRAF39, TRAF46]
+  - section: "Entrant prépayé (Consumer)"
+    range: [TRAF51, TRAF56]
+  - section: "Entrant postpayé — total"
+    range: [TRAF58, TRAF63]
+  - section: "Entrant postpayé — Consumer Postpaid"
+    range: [TRAF65, TRAF70]
+  - section: "Entrant postpayé — Business Postpaid"
+    range: [TRAF72, TRAF77]
+  - section: "Entrant postpayé — Business Prepaid"
+    range: [TRAF79, TRAF84]
