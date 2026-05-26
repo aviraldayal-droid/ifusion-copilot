@@ -991,6 +991,35 @@
     }
     .error-badge { color: var(--error); font-size: 0.875rem; }
 
+    /* Clarifying-question option chips (rendered from numbered LLM lists) */
+    .clarify-options {
+      display: flex; flex-direction: column; gap: 6px;
+      margin: 10px 0 6px;
+    }
+    .clarify-chip {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 12px; border-radius: 8px;
+      background: var(--surface2); border: 1px solid var(--border-mid);
+      color: var(--text); font-size: 0.85rem; font-family: inherit;
+      cursor: pointer; text-align: left;
+      transition: all 0.12s; width: 100%;
+    }
+    .clarify-chip:hover {
+      border-color: var(--accent); background: var(--accent-dim); color: var(--accent);
+    }
+    .clarify-chip-num {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 22px; height: 22px; border-radius: 50%;
+      background: var(--accent); color: #fff; font-size: 0.72rem; font-weight: 700;
+      flex-shrink: 0;
+    }
+    .clarify-chip:disabled {
+      opacity: 0.45; cursor: not-allowed;
+    }
+    .clarify-chip:disabled:hover {
+      border-color: var(--border-mid); background: var(--surface2); color: var(--text);
+    }
+
     /* Thinking trace */
     .thinking { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.84rem; }
     .dots { display: flex; gap: 4px; align-items: center; }
@@ -3912,7 +3941,52 @@
     }
     // Restore verified badge for history playback
     if (verifiedData && role === 'bot') renderVerifiedBadge(bubble, verifiedData);
+    // Detect clarifying-question pattern and render clickable chips
+    if (role === 'bot' && !isError) _renderClarifyChips(bubble, content);
     scrollBottom();
+  }
+
+  // Detect clarifying-question lists in the bot reply and render numbered
+  // chips the user can click instead of typing a number.
+  function _renderClarifyChips(bubble, content) {
+    if (!content || typeof content !== 'string') return;
+    const lower = content.toLowerCase();
+    // Trigger only when the response is clearly a clarifying question
+    if (!(lower.includes('which one') || lower.includes('which do you mean') ||
+          lower.includes('quel(le) voulez') || lower.includes('lequel') ||
+          lower.includes('laquelle') || lower.includes('which sub-section'))) return;
+    // Find lines matching "1. ..." / "2. ..." that come after the question
+    const lines = content.split(/\r?\n/);
+    const options = [];
+    for (const line of lines) {
+      const m = line.match(/^\s*(\d{1,2})[\.\)]\s+(.{2,200})$/);
+      if (m) options.push({ num: parseInt(m[1], 10), text: m[2].trim() });
+    }
+    // Need at least two numbered options to be a clarifying list
+    if (options.length < 2) return;
+    // Sort by number and dedupe
+    options.sort((a, b) => a.num - b.num);
+    // Render chips
+    const wrap = document.createElement('div');
+    wrap.className = 'clarify-options';
+    options.forEach(opt => {
+      const btn = document.createElement('button');
+      btn.className = 'clarify-chip';
+      btn.innerHTML = `<span class="clarify-chip-num">${opt.num}</span><span>${escHtml(opt.text)}</span>`;
+      btn.onclick = () => {
+        // Disable all chips in this group once one is picked
+        wrap.querySelectorAll('.clarify-chip').forEach(c => c.disabled = true);
+        btn.style.borderColor = 'var(--accent)';
+        btn.style.background = 'var(--accent-dim)';
+        // Send the option text as the next user message
+        const ta = document.getElementById('user-input');
+        ta.value = opt.text;
+        ta.dispatchEvent(new Event('input'));
+        sendMessage();
+      };
+      wrap.appendChild(btn);
+    });
+    bubble.appendChild(wrap);
   }
 
   function copyMsg(id) {
