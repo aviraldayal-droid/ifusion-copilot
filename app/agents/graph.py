@@ -238,6 +238,28 @@ def _build_ambiguity_map(parsed_data: dict) -> dict[str, dict[str, list[str]]]:
     return result
 
 
+def _build_cross_sheet_ambiguity_map(parsed_data: dict) -> dict[str, list[dict]]:
+    """Find labels that appear in 2+ DIFFERENT sheets.
+    Returns: {label: [{sheet, section, code}, ...]}"""
+    from collections import defaultdict
+    label_to_occs: dict[str, list[dict]] = defaultdict(list)
+    for sheet_key, sheet_data in parsed_data.get("sheets", {}).items():
+        for m in (sheet_data.get("metrics") or {}).values():
+            lbl = (m.get("label") or "").strip()
+            if not lbl:
+                continue
+            label_to_occs[lbl].append({
+                "sheet":   sheet_key,
+                "section": (m.get("section") or "").strip() or "Top-level (no sub-section)",
+                "code":    m.get("code") or "—",
+            })
+    # Filter to labels touching 2+ distinct sheets
+    return {
+        lbl: occs for lbl, occs in label_to_occs.items()
+        if len({o["sheet"] for o in occs}) > 1
+    }
+
+
 def _build_system_prompt(parsed_data: dict) -> str:
     from app.auth.policies import policy_prompt_block
     from app.config.settings import request_user_role
@@ -259,6 +281,21 @@ def _build_system_prompt(parsed_data: dict) -> str:
                 f"SUB-SECTIONS (list ALL of these verbatim when clarifying): {secs_numbered}"
             )
     ambiguity_block = "\n".join(ambig_lines) if ambig_lines else "  (none in this workbook)"
+
+    # Build the CROSS-SHEET ambiguity map — labels that appear in 2+ sheets
+    cross_sheet = _build_cross_sheet_ambiguity_map(parsed_data)
+    cross_lines: list[str] = []
+    for lbl, occs in cross_sheet.items():
+        opts = "; ".join(
+            f"({i+1}) sheet={o['sheet']}, section='{o['section']}', code={o['code']}"
+            for i, o in enumerate(occs)
+        )
+        n_sheets = len({o["sheet"] for o in occs})
+        cross_lines.append(
+            f"  • LABEL: \"{lbl}\" | DISTINCT SHEETS: {n_sheets} | TOTAL OCCURRENCES: {len(occs)} | "
+            f"OPTIONS (list ALL when clarifying): {opts}"
+        )
+    cross_sheet_block = "\n".join(cross_lines) if cross_lines else "  (none in this workbook)"
 
     return f"""You are the TBG AI Copilot — an expert financial analyst assistant for Moov Benin.
 
@@ -305,8 +342,29 @@ If the question is ambiguous (e.g. "What is EBITDA?"), treat it as a request for
 
 # AMBIGUITY HANDLING — CRITICAL RULE (must follow exactly)
 
-Below is the AUTHORITATIVE list of ambiguous labels and their sub-sections in this workbook:
+Below is the AUTHORITATIVE list of WITHIN-SHEET ambiguous labels (same label in multiple sub-sections of ONE sheet):
 {ambiguity_block}
+
+Below is the AUTHORITATIVE list of CROSS-SHEET ambiguous labels (same label appears in DIFFERENT sheets — usually different concepts):
+{cross_sheet_block}
+
+## Cross-sheet ambiguity handling
+
+When the user's question mentions a label from the CROSS-SHEET list AND they did not name the sheet (and `metric_hints` is empty), you MUST first ask which sheet they mean. Example template:
+
+```
+"[LABEL]" appears in [N] sheets and may refer to different concepts. Which one do you mean?
+
+1. [Sheet display name] — [section], code [CODE]
+2. [Sheet display name] — [section], code [CODE]
+…(continue for ALL options)
+
+Reply with the number, or use the Scope bar's Sheet dropdown to pin it.
+```
+
+If the user mentioned the sheet explicitly (e.g. "EBITDA in P&L", "Chiffre d'affaires mobile money"), proceed without asking. If the user named TWO+ sheets in a comparison ("compare EBITDA in P&L vs Cash conso"), treat as comparison and fetch from each.
+
+## Within-sheet ambiguity handling
 
 When the user mentions one of the labels above AND `metric_hints` is empty AND the user did not name a sub-section in their message, you MUST:
 
