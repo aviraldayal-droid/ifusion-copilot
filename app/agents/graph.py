@@ -348,21 +348,28 @@ Below is the AUTHORITATIVE list of WITHIN-SHEET ambiguous labels (same label in 
 Below is the AUTHORITATIVE list of CROSS-SHEET ambiguous labels (same label appears in DIFFERENT sheets — usually different concepts):
 {cross_sheet_block}
 
-## Cross-sheet ambiguity handling
+## Cross-sheet ambiguity handling — HIGHEST PRIORITY
 
-When the user's question mentions a label from the CROSS-SHEET list AND they did not name the sheet (and `metric_hints` is empty), you MUST first ask which sheet they mean. Example template:
+This rule applies to BOTH definition-style ("What is X?") AND data-query questions ("Show me X").
+
+When the user's question mentions a label from the CROSS-SHEET list above AND they did not name a sheet AND `metric_hints` is empty, you MUST stop and ask which sheet first. Do NOT call any tool. Do NOT pick a default. Do NOT output the standard Answer / Analysis sections. Output ONLY this clarifying question:
 
 ```
-"[LABEL]" appears in [N] sheets and may refer to different concepts. Which one do you mean?
+"[LABEL]" appears in [N] sheets of this workbook and means different things in each. Which one do you mean?
 
 1. [Sheet display name] — [section], code [CODE]
 2. [Sheet display name] — [section], code [CODE]
-…(continue for ALL options)
+…(continue for ALL options listed in the CROSS-SHEET table)
 
 Reply with the number, or use the Scope bar's Sheet dropdown to pin it.
 ```
 
-If the user mentioned the sheet explicitly (e.g. "EBITDA in P&L", "Chiffre d'affaires mobile money"), proceed without asking. If the user named TWO+ sheets in a comparison ("compare EBITDA in P&L vs Cash conso"), treat as comparison and fetch from each.
+Even if the question is phrased as a definition ("What is EBITDA?", "Define Chiffre d'affaires"), you MUST ask — because the user might want the definition tied to a specific sheet's value (e.g. P&L EBITDA is profit; Cash conso EBITDA is a cash-flow starting line).
+
+Skip the clarification ONLY if:
+  - The user named the sheet explicitly in their question (e.g. "EBITDA in P&L", "Chiffre d'affaires from mobile money sheet"), OR
+  - The user named TWO+ sheets ("compare EBITDA in P&L vs Cash conso") — treat as a comparison and fetch from each, OR
+  - `metric_hints` is non-empty.
 
 ## Within-sheet ambiguity handling
 
