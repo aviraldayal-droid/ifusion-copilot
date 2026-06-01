@@ -53,6 +53,18 @@ def _severity(change_pct: float, warning: float, critical: float, higher_is_wors
         return "OK"
 
 
+_SHEET_UNITS = {
+    "parc_mobile":    "subscribers",
+    "data_mobile":    "subscribers / GB",
+    "mobile_money":   "subscribers / transactions",
+    "trafic_mobile":  "minutes",
+}
+
+
+def _sheet_unit(sheet_key: str) -> str:
+    return _SHEET_UNITS.get(sheet_key, "M CFA")
+
+
 def run_alerts_check(parsed_data: dict, thresholds: dict, period: str, role: str | None = None) -> list[dict]:
     """
     Scan all metrics against threshold rules for a given period.
@@ -331,12 +343,13 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         vs_bud_pct = compute_vs_budget_pct(reel, budget)
         yoy_pct = compute_yoy_pct(reel, n1)
 
+        unit = _sheet_unit(key)
         lines = [
             f"{metric['label']} ({period}):",
-            f"  Réel (Actual) : {_fmt(reel)} M CFA",
-            f"  Budget        : {_fmt(budget)} M CFA",
-            f"  Écart/Budget  : {_fmt(ecart)} M CFA  ({_pct(vs_bud_pct)})",
-            f"  N-1 Réel      : {_fmt(n1)} M CFA",
+            f"  Réel (Actual) : {_fmt(reel)} {unit}",
+            f"  Budget        : {_fmt(budget)} {unit}",
+            f"  Écart/Budget  : {_fmt(ecart)} {unit}  ({_pct(vs_bud_pct)})",
+            f"  N-1 Réel      : {_fmt(n1)} {unit}",
             f"  Évolution YoY : {_pct(yoy_pct)}",
         ]
         return "\n".join(lines)
@@ -436,7 +449,7 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
             delta = reel - n1
             yoy_pct = compute_yoy_pct(reel, n1)
             vs_bud_pct = compute_vs_budget_pct(reel, budget)
-            decomp.append((abs(delta), f"{m['label']}: Δ={_fmt(delta)} M CFA "
+            decomp.append((abs(delta), f"{m['label']}: Δ={_fmt(delta)} {_sheet_unit(key)} "
                 f"({_pct(yoy_pct)} YoY) | vs Budget {_pct(vs_bud_pct)}"))
 
         decomp.sort(reverse=True)
@@ -641,6 +654,15 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
                 for vtype in requested_vtypes:
                     y_keys.append(f"{m_label}_{vtype}")
 
+        # Choose a unit based on the sheet — TBG uses different scales per sheet
+        _SHEET_UNITS = {
+            "parc_mobile":    "subscribers",
+            "data_mobile":    "subscribers / GB",
+            "mobile_money":   "subscribers / transactions",
+            "trafic_mobile":  "minutes",
+        }
+        unit = _SHEET_UNITS.get(key, "M CFA")
+
         spec = {
             "chart_type": chart_type,
             "title": f"{key.replace('_', ' ').title()} — {chart_type.title()} Chart",
@@ -649,7 +671,7 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
             "x_key": "period",
             "y_keys": y_keys,
             "data": chart_data,
-            "unit": "M CFA",
+            "unit": unit,
             "colors": ["#2196F3", "#FF9800", "#4CAF50", "#F44336", "#9C27B0"],
         }
 
