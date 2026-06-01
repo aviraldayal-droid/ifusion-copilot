@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # Set a strong secret here; leave empty to disable all registration.
     ADMIN_KEY: str = ""
 
+    # When True, the DB pipeline checks the semantic cache for repeated
+    # questions and skips the LLM round-trip on hits. Disable when the cache
+    # is returning stale or wrong answers — set to False here OR via env var.
+    SEMANTIC_CACHE_ENABLED: bool = False
+
     MAX_SESSIONS: int = 50
     SESSION_TTL_HOURS: int = 24
     APP_TITLE: str = "TBG AI Copilot"

@@ -3398,9 +3398,10 @@ async def run_db_agent(
 
     # ─────────────────────────────────────────────────────────────
     # Semantic cache check (skip for definition-only questions)
+    # Gated by SEMANTIC_CACHE_ENABLED — see app/config/settings.py
     # ─────────────────────────────────────────────────────────────
-    q_embedding = await asyncio.to_thread(embed_text, message)
-    cached = semantic_cache.get(message, q_embedding)
+    q_embedding = await asyncio.to_thread(embed_text, message) if settings.SEMANTIC_CACHE_ENABLED else None
+    cached = semantic_cache.get(message, q_embedding) if settings.SEMANTIC_CACHE_ENABLED else None
     if cached is not None:
             # Validate the API key BEFORE serving a cached answer — otherwise users
             # with a revoked / wrong key would receive someone else's previous answer.
@@ -3469,7 +3470,7 @@ async def run_db_agent(
     # Store in semantic cache if pipeline succeeded (has SQL + non-error answer)
     error_phrases = ("unable to generate", "could not", "error", "failed")
     pipeline_ok = bool(sql) and not any(p in answer.lower() for p in error_phrases)
-    if pipeline_ok:
+    if pipeline_ok and settings.SEMANTIC_CACHE_ENABLED:
         semantic_cache.set(message, sql, rows, cols, answer, embedding=q_embedding)
 
     if definition_prefix:
@@ -3515,9 +3516,9 @@ async def run_db_agent_stream(
     history_turns = _conversation_history.get(thread_id, [])
     history_text  = "\n".join(history_turns[-6:])
 
-    # ── Semantic cache check ──────────────────────────────────────────────────
-    q_embedding = await asyncio.to_thread(embed_text, message)
-    cached = semantic_cache.get(message, q_embedding)
+    # ── Semantic cache check (gated by SEMANTIC_CACHE_ENABLED) ─────────────
+    q_embedding = await asyncio.to_thread(embed_text, message) if settings.SEMANTIC_CACHE_ENABLED else None
+    cached = semantic_cache.get(message, q_embedding) if settings.SEMANTIC_CACHE_ENABLED else None
     if cached is not None:
             # Validate the API key BEFORE serving a cached answer — prevents users
             # with a revoked / wrong key from receiving someone else's previous answer.
@@ -3741,7 +3742,7 @@ async def run_db_agent_stream(
     # Store in semantic cache if pipeline succeeded
     error_phrases = ("unable to generate", "could not", "error", "failed")
     pipeline_ok = bool(sql) and not any(p in full_answer.lower() for p in error_phrases)
-    if pipeline_ok:
+    if pipeline_ok and settings.SEMANTIC_CACHE_ENABLED:
         semantic_cache.set(message, sql, rows, cols, full_answer, embedding=q_embedding)
 
     history_entry = f"User: {message}"
