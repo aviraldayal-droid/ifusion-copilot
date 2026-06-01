@@ -53,11 +53,13 @@ def _severity(change_pct: float, warning: float, critical: float, higher_is_wors
         return "OK"
 
 
-def run_alerts_check(parsed_data: dict, thresholds: dict, period: str) -> list[dict]:
+def run_alerts_check(parsed_data: dict, thresholds: dict, period: str, role: str | None = None) -> list[dict]:
     """
     Scan all metrics against threshold rules for a given period.
     Returns a list of alert dicts for CRITICAL and WARNING severities.
+    When `role` is given, filter out alerts the role cannot access.
     """
+    from app.auth.policies import check_metric
     sheets = parsed_data.get("sheets", {})
     threshold_rules = thresholds.get("rules", [])
     alerts: list[dict] = []
@@ -77,6 +79,12 @@ def run_alerts_check(parsed_data: dict, thresholds: dict, period: str) -> list[d
         metric = sheet["metrics"].get(metric_code)
         if not metric:
             continue
+
+        # Role-based filter: drop alerts for sheets/sections this role can't see
+        if role:
+            allowed, _ = check_metric(role, sheet_key, metric.get("section"))
+            if not allowed:
+                continue
 
         vals = metric["values"].get(period)
         if not vals:
@@ -178,6 +186,52 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
                 return m
         return None
 
+    # ------------------------------------------------------------------
+    # Role-based access helpers (read user_role from request ContextVar)
+    # ------------------------------------------------------------------
+    def _role_ctx() -> str:
+        try:
+            from app.config.settings import request_user_role
+            return request_user_role.get() or "viewer"
+        except Exception:
+            return "viewer"
+
+    def _refusal(sheet_key: str | None, section: str | None, reason: str) -> str:
+        from app.auth.policies import get_policy
+        label = get_policy(_role_ctx()).get("label", _role_ctx())
+        scope = f"sheet '{sheet_key}'" + (f" / section '{section}'" if section else "")
+        return (
+            f"Access denied for your role ({label}). "
+            f"This data ({scope}) is restricted: {reason}. "
+            f"Contact the administrator if you need access."
+        )
+
+    def _sheet_allowed(sheet_key: str) -> tuple[bool, str]:
+        from app.auth.policies import check_metric
+        return check_metric(_role_ctx(), sheet_key, None)
+
+    def _metric_allowed(sheet_key: str, metric: dict | None) -> tuple[bool, str]:
+        from app.auth.policies import check_metric
+        section = (metric or {}).get("section") if metric else None
+        return check_metric(_role_ctx(), sheet_key, section)
+
+    def _filter_sheets_for_role() -> list[str]:
+        """Return only the sheet keys the current role can access."""
+        from app.auth.policies import check_metric
+        role = _role_ctx()
+        return [sk for sk in sheets.keys() if check_metric(role, sk, None)[0]]
+
+    def _filter_metrics_for_role(sheet_key: str, metrics: dict) -> dict:
+        """Return only the metrics whose section the current role can access."""
+        from app.auth.policies import check_metric
+        role = _role_ctx()
+        out: dict = {}
+        for k, m in metrics.items():
+            ok, _ = check_metric(role, sheet_key, m.get("section"))
+            if ok:
+                out[k] = m
+        return out
+
     # ===================================================================
     # Tool 1 – list_available_sheets
     # ===================================================================
@@ -187,13 +241,14 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         List all available TBG report sheets parsed from the uploaded file.
         Use this to discover what data is available before querying metrics.
         """
+        allowed = _filter_sheets_for_role()
         lines = ["Available TBG report sheets:"]
-        for key in sheets:
+        for key in allowed:
             sheet = sheets[key]
-            n_metrics = len(sheet.get("metrics", {}))
+            allowed_metrics = _filter_metrics_for_role(key, sheet.get("metrics", {}))
             periods = sheet.get("periods", [])
             period_range = f"{periods[0]} to {periods[-1]}" if periods else "N/A"
-            lines.append(f"  • {key}: {n_metrics} metrics | {period_range}")
+            lines.append(f"  • {key}: {len(allowed_metrics)} metrics | {period_range}")
         lines.append(f"\nAll available periods: {', '.join(all_periods)}")
         return "\n".join(lines)
 
@@ -211,10 +266,14 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         """
         key = _resolve_sheet(sheet_name)
         if not key:
-            return f"Sheet '{sheet_name}' not found. Available: {list(sheets.keys())}"
+            return f"Sheet '{sheet_name}' not found. Available: {_filter_sheets_for_role()}"
+        ok, reason = _sheet_allowed(key)
+        if not ok:
+            return _refusal(key, None, reason)
         sheet = sheets[key]
+        filtered_metrics = _filter_metrics_for_role(key, sheet["metrics"])
         lines = [f"Metrics in '{key}':"]
-        for mkey, m in sheet["metrics"].items():
+        for mkey, m in filtered_metrics.items():
             code_str = f" [{m['code']}]" if m.get("code") else ""
             section_str = f" (section: {m['section']})" if m.get("section") else ""
             lines.append(f"  {mkey}{code_str}{section_str}: {m['label']}")
@@ -238,6 +297,9 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         key = _resolve_sheet(sheet_name)
         if not key:
             return f"Sheet '{sheet_name}' not found."
+        ok, reason = _sheet_allowed(key)
+        if not ok:
+            return _refusal(key, None, reason)
 
         metric = _get_metric(key, metric_key)
         if not metric:
@@ -247,6 +309,10 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
                 suggestions = ", ".join(f"{k} ({lbl})" for k, lbl in matches[:5])
                 return f"Metric '{metric_key}' not found. Did you mean: {suggestions}?"
             return f"Metric '{metric_key}' not found in sheet '{key}'."
+
+        ok, reason = _metric_allowed(key, metric)
+        if not ok:
+            return _refusal(key, metric.get("section"), reason)
 
         vals = metric["values"].get(period)
         if not vals:
@@ -292,11 +358,15 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         key = _resolve_sheet(sheet_name)
         if not key:
             return f"Sheet '{sheet_name}' not found."
+        ok, reason = _sheet_allowed(key)
+        if not ok:
+            return _refusal(key, None, reason)
 
         sheet = sheets[key]
+        filtered = _filter_metrics_for_role(key, sheet["metrics"])
         rows: list[tuple[float, str]] = []
 
-        for mkey, m in sheet["metrics"].items():
+        for mkey, m in filtered.items():
             vals = m["values"].get(period)
             if not vals:
                 continue
@@ -340,13 +410,21 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         key = _resolve_sheet(sheet_name)
         if not key:
             return f"Sheet '{sheet_name}' not found."
+        ok, reason = _sheet_allowed(key)
+        if not ok:
+            return _refusal(key, None, reason)
 
         sheet = sheets[key]
         parent = _get_metric(key, parent_metric_key)
+        if parent:
+            ok, reason = _metric_allowed(key, parent)
+            if not ok:
+                return _refusal(key, parent.get("section"), reason)
+        filtered = _filter_metrics_for_role(key, sheet["metrics"])
 
         decomp: list[tuple[float, str]] = []
 
-        for mkey, m in sheet["metrics"].items():
+        for mkey, m in filtered.items():
             vals = m["values"].get(period)
             if not vals:
                 continue
@@ -397,10 +475,16 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         key = _resolve_sheet(sheet_name)
         if not key:
             return f"Sheet '{sheet_name}' not found."
+        ok, reason = _sheet_allowed(key)
+        if not ok:
+            return _refusal(key, None, reason)
 
         metric = _get_metric(key, metric_key)
         if not metric:
             return f"Metric '{metric_key}' not found in sheet '{key}'."
+        ok, reason = _metric_allowed(key, metric)
+        if not ok:
+            return _refusal(key, metric.get("section"), reason)
 
         periods_with_data = sorted(metric["values"].keys())[-num_periods:]
         lines = [f"Trend: {metric['label']} ({key})", ""]
@@ -439,11 +523,15 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         key = _resolve_sheet(sheet_name)
         if not key:
             return f"Sheet '{sheet_name}' not found."
+        ok, reason = _sheet_allowed(key)
+        if not ok:
+            return _refusal(key, None, reason)
 
         sheet = sheets[key]
+        filtered = _filter_metrics_for_role(key, sheet["metrics"])
         changes: list[tuple[float, str]] = []
 
-        for mkey, m in sheet["metrics"].items():
+        for mkey, m in filtered.items():
             v1 = m["values"].get(period1, {})
             v2 = m["values"].get(period2, {})
             r1 = v1.get("reel")
@@ -502,6 +590,9 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         key = _resolve_sheet(sheet_name)
         if not key:
             return f"Sheet '{sheet_name}' not found."
+        ok, reason = _sheet_allowed(key)
+        if not ok:
+            return _refusal(key, None, reason)
 
         sheet = sheets[key]
         requested_periods = (
@@ -597,6 +688,11 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
             if not metric:
                 continue
 
+            # Skip metrics the user's role can't see
+            allowed_metric, _ = _metric_allowed(sheet_key, metric)
+            if not allowed_metric:
+                continue
+
             vals = metric["values"].get(period)
             if not vals:
                 continue
@@ -666,9 +762,13 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
             period2: Later period YYYY-MM.
         """
         all_changes: list[tuple[float, str]] = []
+        allowed_sheets = set(_filter_sheets_for_role())
 
         for sheet_key, sheet in sheets.items():
-            for mkey, m in sheet["metrics"].items():
+            if sheet_key not in allowed_sheets:
+                continue
+            filtered = _filter_metrics_for_role(sheet_key, sheet["metrics"])
+            for mkey, m in filtered.items():
                 v1 = m["values"].get(period1, {})
                 v2 = m["values"].get(period2, {})
                 r1 = v1.get("reel")

@@ -769,8 +769,9 @@ async def db_health():
 # GET /api/v1/db/alerts
 # ---------------------------------------------------------------------------
 @router.get("/db/alerts")
-async def db_alerts():
-    """Return metrics significantly under budget (>10% below) for the most recent month."""
+async def db_alerts(optional_user: dict | None = Depends(get_optional_user)):
+    """Return metrics significantly under budget (>10% below) for the most recent month.
+    Filtered by the authenticated user's role — viewers/managers don't see Personnel/treasury rows."""
     import asyncio
     _SQL_ALERTS = """
 WITH fmd AS (
@@ -805,6 +806,24 @@ ORDER BY vs_budget_pct ASC
 LIMIT 25
 """
     rows, _ = await asyncio.to_thread(db_execute, _SQL_ALERTS)
+    # Apply role-based filter: drop rows whose category matches a blocked section/keyword
+    user_role = (optional_user or {}).get("role", "viewer")
+    if user_role != "admin":
+        from app.auth.policies import get_policy
+        pol = get_policy(user_role)
+        blocked_secs = [s.lower() for s in (pol.get("blocked_sections") or [])]
+        blocked_keywords = [k.lower() for k in (pol.get("blocked_keywords") or [])]
+        def _allowed(row: dict) -> bool:
+            cat = (row.get("category") or "").lower()
+            metric = (row.get("metric") or "").lower()
+            for b in blocked_secs:
+                if b in cat or b in metric:
+                    return False
+            for k in blocked_keywords:
+                if k in metric:
+                    return False
+            return True
+        rows = [r for r in rows if _allowed(r)]
     return {"alerts": rows, "period": rows[0]["period"] if rows else None}
 
 
