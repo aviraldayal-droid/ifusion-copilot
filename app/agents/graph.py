@@ -239,10 +239,13 @@ def _build_ambiguity_map(parsed_data: dict) -> dict[str, dict[str, list[str]]]:
 
 
 def _build_system_prompt(parsed_data: dict) -> str:
+    from app.auth.policies import policy_prompt_block
+    from app.config.settings import request_user_role
     sheets     = list(parsed_data.get("sheets", {}).keys())
     periods    = parsed_data.get("all_periods", [])
     period_range = f"{periods[0]} to {periods[-1]}" if periods else "unknown"
     file_name  = parsed_data.get("file", "uploaded file")
+    role_block = policy_prompt_block(request_user_role.get())
 
     # Build a structured map of ambiguous labels for inline disambiguation.
     # Format as a strict reference table so the LLM cannot drop entries.
@@ -263,6 +266,8 @@ You have access to data parsed from the TBG report: {file_name}
 Available sheets: {', '.join(sheets)}
 Available periods: {period_range}
 
+# ROLE-BASED ACCESS CONTROL
+{role_block}
 # DATA RULES
 - Always use tools to retrieve real data; NEVER invent numbers.
 - For monetary values: thousands separators, one decimal place, unit M CFA.
@@ -405,9 +410,10 @@ def _make_chat_model(model: str | None = None) -> ChatOllama:
 
 
 def get_or_create_graph(session_id: str, parsed_data: dict, model: str | None = None):
-    from app.config.settings import request_api_key
+    from app.config.settings import request_api_key, request_user_role
     api_key = request_api_key.get() or settings.OLLAMA_API_KEY
-    key = f"{session_id}:{model or settings.OLLAMA_MODEL}:{api_key}"
+    role    = request_user_role.get() or "viewer"
+    key = f"{session_id}:{model or settings.OLLAMA_MODEL}:{api_key}:{role}"
     if key in _graph_cache:
         return _graph_cache[key]
     thresholds = _load_thresholds()

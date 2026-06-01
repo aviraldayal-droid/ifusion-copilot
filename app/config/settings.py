@@ -7,6 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Falls back to settings.OLLAMA_API_KEY when not set.
 request_api_key: ContextVar[str] = ContextVar("request_api_key", default="")
 
+# Per-request user role — set by route handlers, read by the agent system
+# prompt builder so role restrictions can be enforced by the LLM itself.
+request_user_role: ContextVar[str] = ContextVar("request_user_role", default="viewer")
+
 # Compute .env search paths at module level so Docker shallow paths work.
 # Local: /home/.../tbg_copilot/tb/app/config/settings.py → parents 2,3,4 all valid.
 # Docker: /app/app/config/settings.py → only parents 0-3 exist; skip parent[4].

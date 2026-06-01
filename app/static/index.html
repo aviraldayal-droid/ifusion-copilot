@@ -1481,6 +1481,15 @@
       font-size: 0.72rem; color: #fff; font-weight: 700;
     }
     .sb-user-details { flex: 1; min-width: 0; }
+    .role-badge {
+      display: inline-block; padding: 1px 7px; border-radius: 10px;
+      font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.06em; margin-left: 4px; vertical-align: middle;
+    }
+    .role-badge.role-admin     { background: rgba(239, 68, 68, 0.15);  color: #ef4444; }
+    .role-badge.role-executive { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
+    .role-badge.role-manager   { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
+    .role-badge.role-viewer    { background: rgba(107, 114, 128, 0.15); color: #6b7280; }
     .sb-user-name {
       font-size: 0.76rem; font-weight: 600; color: var(--sb-text);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -2404,8 +2413,10 @@
     if (_authUser) {
       if (infoEl)  infoEl.classList.add('show');
       if (nameEl)  nameEl.textContent  = _authUser.name  || _authUser.email;
-      if (emailEl) emailEl.textContent = _authUser.email || '';
-      if (avEl)    avEl.textContent    = (_authUser.name || _authUser.email || '?').charAt(0).toUpperCase();
+      const role  = _authUser.role || 'viewer';
+      const roleBadge = `<span class="role-badge role-${role}">${role}</span>`;
+      if (emailEl) emailEl.innerHTML = `${escHtml(_authUser.email || '')} ${roleBadge}`;
+      if (avEl)    avEl.textContent  = (_authUser.name || _authUser.email || '?').charAt(0).toUpperCase();
     } else {
       if (infoEl) infoEl.classList.remove('show');
     }

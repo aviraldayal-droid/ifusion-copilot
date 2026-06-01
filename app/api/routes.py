@@ -352,30 +352,44 @@ _SHEET_DISPLAY_NAMES: dict[str, str] = {
 
 
 @router.get("/sessions/{session_id}/field-map", response_model=FieldMapResponse)
-async def get_field_map(session_id: str):
+async def get_field_map(
+    session_id: str,
+    optional_user: dict | None = Depends(get_optional_user),
+):
     """
     Return a structured mapping of all sheets → sub-sections → metrics,
     annotated with which labels appear more than once in a sheet.
     Used by the UI to let users select specific metrics before asking a question.
+    Filtered by the authenticated user's role.
     """
     from collections import Counter, defaultdict
+    from app.auth.policies import check_metric
 
     session = _require_session(session_id)
     parsed  = session["parsed_data"]
+    user_role = (optional_user or {}).get("role", "viewer")
 
     sheets_out: list[FieldMapSheet] = []
 
     for sheet_key, sheet_data in parsed.get("sheets", {}).items():
+        # Drop the entire sheet if the role can't see it
+        allowed, _ = check_metric(user_role, sheet_key, None)
+        if not allowed:
+            continue
         metrics = sheet_data.get("metrics", {})
 
         # Find duplicate labels within this sheet
         label_counts = Counter(m["label"] for m in metrics.values())
         duplicate_labels = [lbl for lbl, cnt in label_counts.items() if cnt > 1]
 
-        # Group metrics by section, preserving insertion order
+        # Group metrics by section, preserving insertion order — and drop
+        # any section the user's role can't see
         sections_map: dict[str, list[FieldMapMetric]] = defaultdict(list)
         for m in metrics.values():
             sec = m.get("section") or ""
+            ok, _ = check_metric(user_role, sheet_key, sec)
+            if not ok:
+                continue
             sections_map[sec].append(FieldMapMetric(
                 code=m.get("code"),
                 label=m["label"],
@@ -484,6 +498,26 @@ async def db_chat(
     if not per_user_key:
         raise HTTPException(status_code=403, detail="NO_API_KEY")
     _token = request_api_key.set(per_user_key)
+
+    # ── Policy check (role-based access control) ───────────────────────────
+    from app.auth.policies import check_question, policy_refusal_text
+    from app.config.settings import request_user_role
+    from app.db.auth_store import log_policy_block
+    user_role = (optional_user or {}).get("role", "viewer")
+    request_user_role.set(user_role)
+    allowed, blocked_term = check_question(user_role, request.message)
+    if not allowed:
+        if optional_user:
+            await _asyncio.to_thread(
+                log_policy_block, optional_user["id"], user_role,
+                request.message, blocked_term, "keyword block (db_chat)"
+            )
+        refusal = policy_refusal_text(blocked_term, user_role, language=request.language)
+        return ChatResponse(
+            response=refusal, conversation_id=request.conversation_id,
+            charts=[], alerts=[], session_id="db-global",
+            inference_time=0.0, conv_id=request.conv_id,
+        )
 
     # Use a fixed "db" session so the graph is shared across all DB chats
     # but each conversation_id gets its own thread in MemorySaver.
@@ -613,6 +647,26 @@ async def db_chat_stream(
     if not per_user_key:
         raise HTTPException(status_code=403, detail="NO_API_KEY")
     request_api_key.set(per_user_key)
+
+    # ── Policy check ───────────────────────────────────────────────────────
+    from app.auth.policies import check_question, policy_refusal_text
+    from app.config.settings import request_user_role
+    from app.db.auth_store import log_policy_block
+    user_role = (optional_user or {}).get("role", "viewer")
+    request_user_role.set(user_role)
+    allowed, blocked_term = check_question(user_role, request.message)
+    if not allowed:
+        if optional_user:
+            await _asyncio.to_thread(
+                log_policy_block, optional_user["id"], user_role,
+                request.message, blocked_term, "keyword block (db_chat_stream)"
+            )
+        refusal = policy_refusal_text(blocked_term, user_role, language=request.language)
+        async def _refusal_gen():
+            yield f"event: token\ndata: {_json.dumps({'text': refusal})}\n\n"
+            yield f"event: done\ndata: {_json.dumps({'inference_time': 0.0, 'charts': []})}\n\n"
+        return FastAPIStreamingResponse(_refusal_gen(), media_type="text/event-stream",
+                                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     session_id = "db-global"
 

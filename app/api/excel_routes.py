@@ -25,7 +25,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.io import to_json
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from app.agents.graph import _make_llm, run_agent, run_agent_stream
@@ -861,7 +861,10 @@ class ExcelStreamChatRequest(BaseModel):
 
 
 @router.post("/chat/stream")
-async def excel_chat_stream(req: ExcelStreamChatRequest):
+async def excel_chat_stream(
+    req: ExcelStreamChatRequest,
+    http_request: Request,
+):
     """
     Streaming chat against a session created by POST /api/v1/excel/upload.
     Returns Server-Sent Events.
@@ -869,6 +872,50 @@ async def excel_chat_stream(req: ExcelStreamChatRequest):
     session = _sessions.get(req.session_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"Session '{req.session_id}' not found or expired.")
+
+    # Resolve user (may be None for anonymous) and check role-based access
+    from app.auth.deps import get_optional_user
+    from app.auth.policies import check_question, policy_refusal_text
+    from app.db.auth_store import log_policy_block
+    from app.config.settings import request_api_key
+
+    # Extract Ollama API key and pin into request context
+    per_user_key = http_request.headers.get("X-Ollama-Api-Key", "").strip()
+    if not per_user_key:
+        async def _no_key():
+            yield f"event: error\ndata: {_json.dumps({'detail': 'NO_API_KEY'})}\n\n"
+        return StreamingResponse(_no_key(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    request_api_key.set(per_user_key)
+
+    # Optional user lookup from bearer token
+    auth_header = http_request.headers.get("Authorization", "")
+    token = auth_header.split(" ", 1)[1].strip() if auth_header.lower().startswith("bearer ") else None
+    user = None
+    if token:
+        try:
+            user = await get_optional_user(token=token)
+        except Exception:
+            user = None
+    user_role = (user or {}).get("role", "viewer")
+    from app.config.settings import request_user_role
+    request_user_role.set(user_role)
+
+    # Policy keyword scan
+    allowed, blocked_term = check_question(user_role, req.message)
+    if not allowed:
+        if user:
+            import asyncio as _asyncio
+            await _asyncio.to_thread(
+                log_policy_block, user["id"], user_role,
+                req.message, blocked_term, "keyword block (excel_chat_stream)"
+            )
+        refusal = policy_refusal_text(blocked_term, user_role, language=req.language)
+        async def _refusal_gen():
+            yield f"event: token\ndata: {_json.dumps({'text': refusal})}\n\n"
+            yield f"event: done\ndata: {_json.dumps({'inference_time': 0.0, 'charts': []})}\n\n"
+        return StreamingResponse(_refusal_gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     parsed_data = session["parsed_data"]
     hints = req.metric_hints if req.metric_hints else None

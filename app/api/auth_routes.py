@@ -70,7 +70,7 @@ async def register(body: RegisterRequest, x_admin_key: str | None = Header(defau
     token = create_access_token(user["id"], user["email"])
     return TokenResponse(
         access_token=token,
-        user={"id": user["id"], "email": user["email"], "name": user["name"]},
+        user={"id": user["id"], "email": user["email"], "name": user["name"], "role": user.get("role", "viewer")},
     )
 
 
@@ -90,7 +90,7 @@ async def login(body: LoginRequest):
     token = create_access_token(user["id"], user["email"], session_token)
     return TokenResponse(
         access_token=token,
-        user={"id": user["id"], "email": user["email"], "name": user["name"]},
+        user={"id": user["id"], "email": user["email"], "name": user["name"], "role": user.get("role", "viewer")},
     )
 
 
@@ -101,4 +101,27 @@ async def me(current_user: dict = Depends(get_current_user)):
         "id":    current_user["id"],
         "email": current_user["email"],
         "name":  current_user["name"],
+        "role":  current_user.get("role", "viewer"),
     }
+
+
+class SetRoleRequest(BaseModel):
+    email: str
+    role:  str = Field(..., pattern="^(admin|executive|manager|viewer)$")
+
+
+@router.post("/admin/set-role")
+async def set_role(
+    body: SetRoleRequest,
+    x_admin_key: str | None = Header(default=None),
+):
+    """Admin-only: change a user's role. Requires X-Admin-Key matching ADMIN_KEY."""
+    admin_key = settings.ADMIN_KEY.strip()
+    if not admin_key or x_admin_key != admin_key:
+        raise HTTPException(status_code=403, detail="Admin key required.")
+    from app.db.auth_store import update_user_role
+    user = await asyncio.to_thread(get_user_by_email, body.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    await asyncio.to_thread(update_user_role, user["id"], body.role)
+    return {"status": "ok", "email": body.email, "role": body.role}

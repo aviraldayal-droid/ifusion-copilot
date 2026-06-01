@@ -1,0 +1,88 @@
+# Role-based access policies for the iFusion Copilot.
+# Each user has a `role` column on copilot_users (default: viewer).
+# The agent enforces these rules before answering — denied queries return a
+# polite refusal and are written to the audit log.
+#
+# Keywords are matched case-insensitively against the user's question.
+# Sections are matched against the parsed TBG workbook's sub-section names.
+# Sheets use the parser's sheet_key (snake_case).
+
+roles:
+
+  admin:
+    label: "Administrator"
+    description: "Full system access including user management."
+    can_manage_users: true
+    allowed_sheets: ["*"]
+    blocked_sections: []
+    blocked_sheets: []
+    blocked_keywords: []
+
+  executive:
+    label: "Executive (CEO / CFO / COO)"
+    description: "Full financial data access. Cannot create or manage user accounts."
+    can_manage_users: false
+    allowed_sheets: ["*"]
+    blocked_sections: []
+    blocked_sheets: []
+    blocked_keywords: []
+
+  manager:
+    label: "Manager (Finance / Department Head)"
+    description: |
+      General KPIs, P&L, revenue, OPEX, CAPEX, subscribers, traffic.
+      Cannot see individual salaries, executive compensation, or treasury position detail.
+    can_manage_users: false
+    allowed_sheets: ["*"]
+    blocked_sheets: []
+    blocked_sections:
+      - "Personnel"           # individual salary lines under OPEX
+      - "Management fees"     # exec compensation / SHL fees
+      - "Provisions clients"  # legal provisions / write-offs
+    blocked_keywords:
+      - "individual salary"
+      - "executive compensation"
+      - "exec comp"
+      - "severance"
+      - "treasury position"
+      - "cash position"
+      - "management fee"
+      - "shl"
+      - "redevance pour marque"
+      - "shareholder loan"
+
+  viewer:
+    label: "Viewer (Read-only Analyst)"
+    description: |
+      Top-level KPIs, revenue totals, EBITDA, subscribers — high-level only.
+      Cannot see individual OPEX/CAPEX line items, personnel details, or treasury data.
+    can_manage_users: false
+    allowed_sheets:
+      - pnl_conso
+      - ca_mobile
+      - parc_mobile
+      - data_mobile
+      - mobile_money
+      - trafic_mobile
+      - marge_mobile
+    blocked_sheets:
+      - cash_conso              # entire treasury sheet
+    blocked_sections:
+      - "Personnel"
+      - "Management fees"
+      - "Provisions clients"
+      - "Frais généraux"
+      - "Impôts, taxes et redevances"
+    blocked_keywords:
+      - "individual"
+      - "salary"
+      - "salaries"
+      - "compensation"
+      - "treasury"
+      - "cash position"
+      - "cash flow"
+      - "provision"
+      - "severance"
+      - "personnel"
+      - "line item"
+      - "detail by employee"

@@ -30,9 +30,22 @@ CREATE TABLE IF NOT EXISTS public.copilot_users (
     name          VARCHAR(200) NOT NULL,
     password_hash VARCHAR(200) NOT NULL,
     session_token VARCHAR(64),
+    role          VARCHAR(30)  NOT NULL DEFAULT 'viewer',
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 ALTER TABLE public.copilot_users ADD COLUMN IF NOT EXISTS session_token VARCHAR(64);
+ALTER TABLE public.copilot_users ADD COLUMN IF NOT EXISTS role VARCHAR(30) NOT NULL DEFAULT 'viewer';
+
+CREATE TABLE IF NOT EXISTS public.copilot_policy_audit (
+    id           SERIAL PRIMARY KEY,
+    user_id      INTEGER     NOT NULL REFERENCES public.copilot_users(id) ON DELETE CASCADE,
+    role         VARCHAR(30) NOT NULL,
+    question     TEXT        NOT NULL,
+    blocked_by   VARCHAR(120) NOT NULL,
+    detail       TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_policy_audit_user ON public.copilot_policy_audit(user_id);
 
 CREATE TABLE IF NOT EXISTS public.copilot_conversations (
     id         SERIAL PRIMARY KEY,
@@ -119,7 +132,7 @@ def get_user_by_email(email: str) -> dict | None:
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, email, name, password_hash, session_token, created_at FROM public.copilot_users WHERE email = %s",
+                "SELECT id, email, name, password_hash, session_token, role, created_at FROM public.copilot_users WHERE email = %s",
                 (email.lower().strip(),),
             )
             row = cur.fetchone()
@@ -135,13 +148,54 @@ def get_user_by_id(user_id: int) -> dict | None:
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, email, name, session_token, created_at FROM public.copilot_users WHERE id = %s",
+                "SELECT id, email, name, session_token, role, created_at FROM public.copilot_users WHERE id = %s",
                 (user_id,),
             )
             row = cur.fetchone()
         return dict(row) if row else None
     finally:
         pool.putconn(conn)
+
+
+def update_user_role(user_id: int, role: str) -> None:
+    ensure_schema()
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE public.copilot_users SET role = %s WHERE id = %s",
+                (role, user_id),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
+def log_policy_block(user_id: int, role: str, question: str, blocked_by: str, detail: str = "") -> None:
+    """Record a denied query in the audit log. Best-effort — never raises."""
+    try:
+        ensure_schema()
+        pool = get_pool()
+        conn = pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO public.copilot_policy_audit
+                       (user_id, role, question, blocked_by, detail)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (user_id, role, question[:2000], blocked_by[:120], detail[:1000]),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        finally:
+            pool.putconn(conn)
+    except Exception as exc:
+        log.warning("log_policy_block failed: %s", exc)
 
 
 def update_session_token(user_id: int, session_token: str) -> None:
