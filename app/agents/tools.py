@@ -14,9 +14,12 @@ Scenarios covered:
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from langchain_core.tools import tool
+
+log = logging.getLogger("tbg.tools")
 
 from app.parsers.excel_parser import (
     compute_vs_budget_pct,
@@ -210,8 +213,12 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
 
     def _refusal(sheet_key: str | None, section: str | None, reason: str) -> str:
         from app.auth.policies import get_policy
-        label = get_policy(_role_ctx()).get("label", _role_ctx())
+        from app.utils.user_logger import log_pipeline_event
+        role = _role_ctx()
+        label = get_policy(role).get("label", role)
         scope = f"sheet '{sheet_key}'" + (f" / section '{section}'" if section else "")
+        log.warning("tool RBAC denial: role=%s scope=%s reason=%s", role, scope, reason)
+        log_pipeline_event("RBAC_BLOCK", f"scope={scope} | reason={reason}")
         return (
             f"Access denied for your role ({label}). "
             f"This data ({scope}) is restricted: {reason}. "
@@ -254,6 +261,7 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         Use this to discover what data is available before querying metrics.
         """
         allowed = _filter_sheets_for_role()
+        log.info("tool list_available_sheets: role=%s visible_sheets=%d", _role_ctx(), len(allowed))
         lines = ["Available TBG report sheets:"]
         for key in allowed:
             sheet = sheets[key]
@@ -308,14 +316,16 @@ def build_tools(parsed_data: dict, thresholds: dict) -> list:
         """
         key = _resolve_sheet(sheet_name)
         if not key:
+            log.warning("tool query_metric: unknown sheet=%r", sheet_name)
             return f"Sheet '{sheet_name}' not found."
         ok, reason = _sheet_allowed(key)
         if not ok:
             return _refusal(key, None, reason)
 
+        log.info("tool query_metric: sheet=%s metric=%s period=%s role=%s", key, metric_key, period, _role_ctx())
         metric = _get_metric(key, metric_key)
         if not metric:
-            # Try fuzzy search and suggest
+            log.warning("tool query_metric: metric not found sheet=%s metric=%s", key, metric_key)
             matches = find_metric_by_label(parsed_data, key, metric_key)
             if matches:
                 suggestions = ", ".join(f"{k} ({lbl})" for k, lbl in matches[:5])

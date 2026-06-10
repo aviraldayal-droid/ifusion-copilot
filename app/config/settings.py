@@ -11,6 +11,11 @@ request_api_key: ContextVar[str] = ContextVar("request_api_key", default="")
 # prompt builder so role restrictions can be enforced by the LLM itself.
 request_user_role: ContextVar[str] = ContextVar("request_user_role", default="viewer")
 
+# Per-request user identity — set by route handlers, read by the pipeline
+# to write activity into the per-user log file.
+request_user_id:    ContextVar[int | None] = ContextVar("request_user_id",    default=None)
+request_user_email: ContextVar[str]        = ContextVar("request_user_email", default="")
+
 # Compute .env search paths at module level so Docker shallow paths work.
 # Local: /home/.../tbg_copilot/tb/app/config/settings.py → parents 2,3,4 all valid.
 # Docker: /app/app/config/settings.py → only parents 0-3 exist; skip parent[4].
@@ -67,6 +72,31 @@ class Settings(BaseSettings):
     SESSION_TTL_HOURS: int = 24
     APP_TITLE: str = "TBG AI Copilot"
     APP_VERSION: str = "1.0.0"
+
+    # ── Keycloak SSO (optional) ────────────────────────────────────────────
+    # When KEYCLOAK_ENABLED is True, /api/v1/auth/keycloak/login is wired up
+    # and the frontend shows a "Sign in with Keycloak" button alongside the
+    # local email+password form. Local auth keeps working either way.
+    KEYCLOAK_ENABLED:        bool = False
+    KEYCLOAK_BASE_URL:       str  = ""   # e.g. "https://197.230.47.51:8082"
+    KEYCLOAK_REALM:          str  = ""   # realm name (NOT the master realm)
+    KEYCLOAK_CLIENT_ID:      str  = ""   # OIDC client_id (confidential client)
+    KEYCLOAK_CLIENT_SECRET:  str  = ""   # OIDC client_secret
+    # Must match a Valid Redirect URI configured on the Keycloak client.
+    KEYCLOAK_REDIRECT_URI:   str  = "http://localhost:8000/api/v1/auth/keycloak/callback"
+    # Where the user lands after a successful login (frontend URL).
+    KEYCLOAK_POST_LOGIN_REDIRECT: str = "/"
+    # Toggle TLS verification on the Keycloak HTTPS endpoint. Set False only
+    # for dev instances with self-signed certs.
+    KEYCLOAK_TLS_VERIFY:     bool = True
+    # Set True when serving the frontend over HTTPS (cookies need Secure).
+    KEYCLOAK_COOKIE_SECURE:  bool = False
+    # JSON mapping of Keycloak realm/client role -> app RBAC role.
+    # Example: {"tbg-admin":"admin","tbg-manager":"manager","tbg-viewer":"viewer"}
+    # First matching role in the user's token wins.
+    KEYCLOAK_ROLE_MAP:       str  = ""
+    # Fallback role for Keycloak users whose roles don't match anything in the map.
+    KEYCLOAK_DEFAULT_ROLE:   str  = "viewer"
 
     model_config = SettingsConfigDict(
         env_file=_ENV_FILES,

@@ -7,7 +7,7 @@ from app.db.auth_store import get_pool, ensure_schema
 
 USERS = [
     ("aviral.dayal@ksolves.com",        "Aviral@250302"),
-    ("youseef.naifi@digiwise.com",       "Youseef@123"),
+    ("youssef.naifi@digiwise.com",       "Youssef@123"),
     ("fatoukine.diengsarr@digiwise.io",  "Fatou@123"),
 ]
 

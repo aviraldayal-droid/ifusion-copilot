@@ -68,3 +68,15 @@ tbg_ai_output.txt
 
 # Docker
 *.env.docker
+
+# Secrets — never commit
+git_token.txt
+*.pem
+*.key
+
+# Runtime logs
+logs/
+*.log
+
+# Internal/business reference material (not for public repo)
+reference_docs/

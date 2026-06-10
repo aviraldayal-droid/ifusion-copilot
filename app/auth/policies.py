@@ -47,6 +47,11 @@ def get_policy(role: str | None) -> dict[str, Any]:
     })
 
 
+def _normalize_for_match(s: str) -> str:
+    """Lowercase + strip spaces/hyphens so 'cashflow', 'cash-flow', 'cash flow' all collide."""
+    return (s or "").lower().replace("-", "").replace(" ", "")
+
+
 def check_question(role: str | None, question: str) -> tuple[bool, str]:
     """
     Quick keyword-level check against the user's question.
@@ -56,9 +61,9 @@ def check_question(role: str | None, question: str) -> tuple[bool, str]:
     """
     pol = get_policy(role)
     blocked = pol.get("blocked_keywords") or []
-    q = (question or "").lower()
+    q_norm = _normalize_for_match(question)
     for kw in blocked:
-        if kw.lower() in q:
+        if _normalize_for_match(kw) in q_norm:
             return False, kw
     return True, ""
 
@@ -141,4 +146,11 @@ def policy_prompt_block(role: str | None) -> str:
         lines.append("BLOCKED keywords (refuse if the question contains any): " +
                      ", ".join(pol["blocked_keywords"]))
     lines.append("If the user asks about a blocked item, respond with a brief refusal mentioning their role and the blocked term — do NOT call any tool, do NOT answer the underlying question.")
+    lines.append(
+        "If the user asks for a definition or general explanation of a financial concept "
+        "(e.g. \"what is X?\", \"explain Y\"), you MAY give a generic textbook definition. "
+        "But you MUST NOT fabricate Moov Benin-specific numbers, examples, monetary figures, "
+        "or scenarios — even illustratively. Do not name the company in examples. "
+        "Keep any examples generic (e.g. \"a typical telecom operator\") and clearly hypothetical."
+    )
     return "\n".join(lines) + "\n"

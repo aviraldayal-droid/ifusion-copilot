@@ -29,6 +29,7 @@ from typing import Iterator, TypedDict
 import sqlglot
 import sqlglot.expressions as sexp
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolCall
+from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
@@ -105,6 +106,12 @@ class OllamaLLM:
     def invoke(self, messages):
         """Convert LangChain or raw messages to Ollama format and get response."""
         msgs = self._prepare_messages(messages)
+        in_chars = sum(len(m.get("content", "")) for m in msgs)
+        log.info("LLM CALL (invoke): model=%s msgs=%d in_chars=%d tools=%s",
+                 self.model, len(msgs), in_chars, len(self.tools) if self.tools else 0)
+        from app.utils.user_logger import log_pipeline_event
+        log_pipeline_event("LLM_CALL", f"invoke | model={self.model} | msgs={len(msgs)} | in={in_chars} chars")
+        t0 = time.monotonic()
         try:
             kwargs: dict = {"model": self.model, "messages": msgs}
             if self.tools:
@@ -140,9 +147,14 @@ class OllamaLLM:
                     args=args,
                     id=f"call_{fn.get('name', '')}_{i}",
                 ))
+            elapsed = time.monotonic() - t0
+            log.info("LLM DONE (invoke): %.2fs | out=%d chars | tool_calls=%d",
+                     elapsed, len(content), len(lc_tc))
+            log_pipeline_event("LLM_DONE", f"invoke | {elapsed:.2f}s | out={len(content)} chars | tool_calls={len(lc_tc)}")
             return AIMessage(content=content, tool_calls=lc_tc) if lc_tc else AIMessage(content=content)
         except Exception as e:
             log.error("Ollama API call failed: %s", str(e))
+            log_pipeline_event("LLM_ERROR", f"invoke failed: {str(e)[:200]}")
             raise
 
     def __call__(self, messages, *args, **kwargs):
@@ -160,15 +172,34 @@ class OllamaLLM:
         """Like invoke() but uses the streaming API so the read-timeout is per-token,
         not per-full-response. Avoids timeouts with slow/large models (e.g. 123B)."""
         msgs = self._prepare_messages(messages)
+        in_chars = sum(len(m.get("content", "")) for m in msgs)
+        log.info("LLM CALL (stream): model=%s msgs=%d in_chars=%d", self.model, len(msgs), in_chars)
+        from app.utils.user_logger import log_pipeline_event
+        log_pipeline_event("LLM_CALL", f"stream | model={self.model} | msgs={len(msgs)} | in={in_chars} chars")
+        t0 = time.monotonic()
         try:
             content = ""
             for chunk in self.client.chat(model=self.model, messages=msgs, stream=True):
                 token = chunk.get("message", {}).get("content", "")
                 if token:
                     content += token
+            elapsed = time.monotonic() - t0
+
+            # Extract and log <think>...</think> reasoning blocks (DeepSeek-R1 / devstral style)
+            think_match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+            if think_match:
+                thinking = think_match.group(1).strip()
+                log.debug("LLM THINKING (%d chars):\n%s", len(thinking), thinking)
+                log_pipeline_event("LLM_THINKING", thinking[:500])
+                # Strip the think block from the content returned to the pipeline
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
+            log.info("LLM DONE (stream): %.2fs | out=%d chars", elapsed, len(content))
+            log_pipeline_event("LLM_DONE", f"stream | {elapsed:.2f}s | out={len(content)} chars")
             return AIMessage(content=content)
         except Exception as e:
             log.error("Ollama API call failed: %s", str(e))
+            log_pipeline_event("LLM_ERROR", f"stream failed: {str(e)[:200]}")
             raise
 
     def stream_tokens(self, messages) -> Iterator[str]:
@@ -260,14 +291,39 @@ def _build_cross_sheet_ambiguity_map(parsed_data: dict) -> dict[str, list[dict]]
     }
 
 
-def _build_system_prompt(parsed_data: dict) -> str:
+def _build_system_prompt(parsed_data: dict, language: str = "en") -> str:
     from app.auth.policies import policy_prompt_block
     from app.config.settings import request_user_role
+    from app.parsers.excel_parser import SHEETS_OF_INTEREST
     sheets     = list(parsed_data.get("sheets", {}).keys())
     periods    = parsed_data.get("all_periods", [])
     period_range = f"{periods[0]} to {periods[-1]}" if periods else "unknown"
     file_name  = parsed_data.get("file", "uploaded file")
     role_block = policy_prompt_block(request_user_role.get())
+
+    is_fr = (language == "fr")
+    h_answer        = "Réponse"                       if is_fr else "Answer"
+    h_analysis      = "Analyse"                       if is_fr else "Analysis"
+    h_visualisation = "Visualisation"                 if is_fr else "Visualisation"
+    h_insights      = "Aperçus et prochaine étape"    if is_fr else "Insights & Next Step"
+    h_what_means    = "Ce que cela signifie"          if is_fr else "What it means"
+    h_followup      = "Suivi suggéré"                 if is_fr else "Suggested follow-up"
+    lang_directive  = (
+        "OUTPUT LANGUAGE — CRITICAL: You MUST respond ENTIRELY in French, regardless of which language the user wrote in. "
+        "Section headings, prose, table column labels, bullet points, and clarifying questions MUST all be in French. "
+        "If the user writes in English, translate your answer into French anyway — leave no English words."
+        if is_fr else
+        "OUTPUT LANGUAGE — CRITICAL: You MUST respond ENTIRELY in English, regardless of which language the user wrote in. "
+        "Section headings, prose, table column labels, bullet points, and clarifying questions MUST all be in English. "
+        "If the user writes in French, translate your answer into English anyway — leave no French words."
+    )
+
+    # Build numbered sheet list for vague-question clarification template
+    _key_to_display = {v: k.strip() for k, v in SHEETS_OF_INTEREST.items()}
+    sheets_numbered = "\n".join(
+        f"  {i + 1}. {_key_to_display.get(s, s)}"
+        for i, s in enumerate(sheets)
+    )
 
     # Build a structured map of ambiguous labels for inline disambiguation.
     # Format as a strict reference table so the LLM cannot drop entries.
@@ -297,7 +353,9 @@ def _build_system_prompt(parsed_data: dict) -> str:
         )
     cross_sheet_block = "\n".join(cross_lines) if cross_lines else "  (none in this workbook)"
 
-    return f"""You are the TBG AI Copilot — an expert financial analyst assistant for Moov Benin.
+    return f"""{lang_directive}
+
+You are the TBG AI Copilot — an expert financial analyst assistant for Moov Benin.
 
 You have access to data parsed from the TBG report: {file_name}
 Available sheets: {', '.join(sheets)}
@@ -310,6 +368,55 @@ Available periods: {period_range}
 - For monetary values: thousands separators, one decimal place, unit M CFA.
 - For percentages: always show the sign (+/- e.g. "+12.4%" or "-8.1%").
 - If metric_hints are provided, use ONLY those metrics — do not search other sheets.
+
+# VAGUE ANALYSIS QUESTIONS — ALWAYS CLARIFY WITH NUMBERED LIST
+
+When the user asks for broad analysis (e.g. "which months had the biggest gap vs budget?", "show me the biggest variances", "what performed worst vs plan?", "which metric overshot budget?") WITHOUT naming a specific metric, sheet, or KPI, you MUST stop and ask which sheet they want. Do NOT call any tool. Do NOT guess. Do NOT ask for metric and sheet in the same turn — ask ONLY for the sheet, exactly as the template specifies. The metric clarification happens in a follow-up turn after the user picks a sheet.
+
+Output the clarification using EXACTLY this template — copy the structure verbatim, including the question line, the blank line, the numbered list (one option per line, no extra text on the option lines), and the final "Reply with..." instruction. The numbered list MUST appear directly after the question line so the UI can render it as clickable buttons.
+
+```
+Which sheet would you like this analysis for? Here are the available options:
+
+{sheets_numbered}
+
+Reply with the number, or name the sheet/metric directly.
+```
+
+STRICT RULES — VIOLATING ANY OF THESE BREAKS THE UI:
+- Do NOT use inline parenthetical examples like "(e.g., revenue, EBITDA, CAPEX)" or "(e.g., pnl_conso, opex_consolides)" inside the question — the UI needs a separate numbered list, not inline examples.
+- Do NOT write the question as a single prose paragraph. The question line MUST stand alone, followed by a blank line, then the numbered list.
+- Do NOT add any sentence between the question line and the numbered list. No "This will let me…", no "Once you pick a sheet…", nothing — just the list.
+- Do NOT mix metric names and sheet names in one list. This template asks ONLY for the sheet.
+- Do NOT use full sentences as numbered options. Each numbered option is a short sheet name only.
+
+AVAILABLE SHEETS FOR THIS WORKBOOK:
+{sheets_numbered}
+
+Skip this clarification ONLY if:
+- The user already named a specific metric or KPI (e.g. "revenue gap vs budget", "EBITDA variance").
+- `metric_hints` is non-empty (scope bar is set).
+- The question is obviously scoped to one sheet (e.g. "which OPEX line items overshot?").
+
+# METRIC CLARIFICATION — SHEET KNOWN, METRIC UNKNOWN
+
+When the user has named or selected a specific sheet but NOT a specific metric (e.g. "Trafic mobile" was selected but no row was named), you MUST:
+
+1. Call `list_metrics(sheet_name)` to get the available metrics.
+2. Present them as a numbered list using EXACTLY this template:
+
+```
+Which metric within [Sheet Name] would you like to analyse? Here are the available options:
+
+1. [Metric label 1]
+2. [Metric label 2]
+3. [Metric label 3]
+…
+
+Reply with the number, or type the metric name directly.
+```
+
+Do NOT ask in free text with examples in parentheses like "(e.g. Total Trafic sortant, Trafic entrant, ...)". Always use a numbered list so the user can click an option. Keep the list to the 15 most relevant metrics if the sheet has many.
 
 # SCOPE GUARD — CRITICAL RULE (must follow exactly)
 
@@ -410,32 +517,32 @@ If your numbered list in the output has fewer entries than the COUNT shown in th
 
 # RESPONSE FORMAT — every answer MUST include all four sections below:
 
-## Answer
+## {h_answer}
 The exact numbers requested, clearly labelled with period, metric, and unit.
 
-## Analysis
+## {h_analysis}
 2–4 sentences explaining what the numbers mean:
 - Compare Réel vs Budget vs N-1 where applicable (compute % gap).
 - Identify the trend direction (growing / declining / volatile / flat).
 - Highlight the biggest contributor or outlier if relevant.
 - Use phrases like "underperformed by X%", "exceeded plan by Y%", "rebounded from", "decelerated to".
 
-## Visualisation
+## {h_visualisation}
 ALWAYS call generate_chart_spec when the answer involves:
 - 2+ periods (use 'line' chart)
 - 2+ categories or entities (use 'bar' chart)
 - A budget-vs-actual comparison (use 'bar' chart, both as series)
 Skip the chart ONLY if the answer is a single scalar with no comparison.
 
-## Insights & Next Step
+## {h_insights}
 End with 1–2 bullets:
-- **What it means**: the business implication ("Below-target growth signals lower acquisition…", "Capex overspend driven by access network upgrades…")
-- **Suggested follow-up**: one concrete next question the user could ask to dig deeper.
+- **{h_what_means}**: the business implication ("Below-target growth signals lower acquisition…", "Capex overspend driven by access network upgrades…")
+- **{h_followup}**: one concrete next question the user could ask to dig deeper.
 
 # STYLE
 - Be concise but complete — no filler, no apologies, no restating the question.
 - Use bullet points for lists, tables for ≥3 rows of comparison data.
-- Write in the same language the user used (FR or EN).
+- {lang_directive}
 - Do NOT use decorative emojis (📊 📈 🔍 💡 etc.) anywhere in your output.
 """
 
@@ -475,6 +582,51 @@ def validate_ollama_api_key(api_key: str) -> bool:
         return True
 
 
+class _UserLogCallbackHandler(BaseCallbackHandler):
+    """Logs every LLM call from create_react_agent (ChatOllama) to the per-user log file."""
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        self._starts: dict = {}
+
+    def on_llm_start(self, serialized, prompts, *, run_id=None, **kwargs):
+        from app.utils.user_logger import log_pipeline_event
+        in_chars = sum(len(p) for p in prompts) if prompts else 0
+        self._starts[run_id] = time.monotonic()
+        log.info("LLM CALL (react): model=%s prompts=%d in_chars=%d", self.model_name, len(prompts or []), in_chars)
+        log_pipeline_event("LLM_CALL", f"react | model={self.model_name} | prompts={len(prompts or [])} | in={in_chars} chars")
+
+    def on_chat_model_start(self, serialized, messages, *, run_id=None, **kwargs):
+        from app.utils.user_logger import log_pipeline_event
+        flat = [m for batch in (messages or []) for m in batch]
+        in_chars = sum(len(getattr(m, "content", "") or "") for m in flat)
+        self._starts[run_id] = time.monotonic()
+        log.info("LLM CALL (react): model=%s msgs=%d in_chars=%d", self.model_name, len(flat), in_chars)
+        log_pipeline_event("LLM_CALL", f"react | model={self.model_name} | msgs={len(flat)} | in={in_chars} chars")
+
+    def on_llm_end(self, response, *, run_id=None, **kwargs):
+        from app.utils.user_logger import log_pipeline_event
+        elapsed = time.monotonic() - self._starts.pop(run_id, time.monotonic())
+        out_chars = 0
+        try:
+            for gen_list in (response.generations or []):
+                for gen in gen_list:
+                    out_chars += len(getattr(gen, "text", "") or "")
+        except Exception:
+            pass
+        log.info("LLM DONE (react): %.2fs | out=%d chars", elapsed, out_chars)
+        log_pipeline_event("LLM_DONE", f"react | {elapsed:.2f}s | out={out_chars} chars")
+
+    def on_llm_error(self, error, *, run_id=None, **kwargs):
+        from app.utils.user_logger import log_pipeline_event
+        log.error("LLM ERROR (react): %s", error)
+        log_pipeline_event("LLM_ERROR", f"react failed: {str(error)[:200]}")
+
+    def on_tool_start(self, serialized, input_str, **kwargs):
+        from app.utils.user_logger import log_pipeline_event
+        tool_name = (serialized or {}).get("name", "?")
+        log_pipeline_event("TOOL_CALL", f"{tool_name}({input_str[:200]})")
+
+
 def _make_chat_model(model: str | None = None) -> ChatOllama:
     """Create a ChatOllama instance (proper Runnable) for use with create_react_agent."""
     from app.config.settings import request_api_key
@@ -483,14 +635,16 @@ def _make_chat_model(model: str | None = None) -> ChatOllama:
     kwargs: dict = {"model": resolved, "base_url": settings.OLLAMA_BASE_URL}
     if api_key:
         kwargs["client_kwargs"] = {"headers": {"Authorization": f"Bearer {api_key}"}}
-    return ChatOllama(**kwargs)
+    chat = ChatOllama(**kwargs)
+    chat.callbacks = [_UserLogCallbackHandler(resolved)]
+    return chat
 
 
-def get_or_create_graph(session_id: str, parsed_data: dict, model: str | None = None):
+def get_or_create_graph(session_id: str, parsed_data: dict, model: str | None = None, language: str = "en"):
     from app.config.settings import request_api_key, request_user_role
     api_key = request_api_key.get() or settings.OLLAMA_API_KEY
     role    = request_user_role.get() or "viewer"
-    key = f"{session_id}:{model or settings.OLLAMA_MODEL}:{api_key}:{role}"
+    key = f"{session_id}:{model or settings.OLLAMA_MODEL}:{api_key}:{role}:{language}"
     if key in _graph_cache:
         return _graph_cache[key]
     thresholds = _load_thresholds()
@@ -499,7 +653,7 @@ def get_or_create_graph(session_id: str, parsed_data: dict, model: str | None = 
     graph = create_react_agent(
         model=chat_model,
         tools=tools,
-        prompt=_build_system_prompt(parsed_data),
+        prompt=_build_system_prompt(parsed_data, language=language),
         checkpointer=MemorySaver(),
     )
     _graph_cache[key] = graph
@@ -585,6 +739,9 @@ def resolve_snapshot(state: DbPipelineState) -> dict:
     Detect explicit snapshot requests and set target_db in state.
     All normal questions pass through unchanged (target_db stays "").
     """
+    log.info("━━━ DB PIPELINE START ━━━ question: %r", state["question"][:150])
+    from app.utils.user_logger import log_pipeline_event
+    log_pipeline_event("DB_PIPELINE", f"question: {state['question'][:200]}")
     from app.db.snapshots import resolve_snapshot as _resolve
     snap = _resolve(state["question"])
     if snap:
@@ -603,11 +760,13 @@ def retrieve_schema(state: DbPipelineState) -> dict:
     try:
         retriever = get_schema_retriever()
         result    = retriever.retrieve(question)
+        table_names = [t.name for t in result.tables]
         log.info(
             "retrieve_schema: %d tables selected (%d chars) — %s",
-            len(result.tables), len(result.schema_text),
-            [t.name for t in result.tables],
+            len(result.tables), len(result.schema_text), table_names,
         )
+        from app.utils.user_logger import log_pipeline_event
+        log_pipeline_event("DB_SCHEMA", f"tables considered: {', '.join(table_names)}")
         return {
             "retrieved_schema": result.schema_text,
             "allowed_tables":   sorted(result.allowed_tables),
@@ -1822,6 +1981,14 @@ def _make_write_sql_node(llm: ChatOllama):
         raw_output = response.content
         log.debug("[attempt %d/%d] Raw LLM output: %s", retry + 1, _MAX_RETRIES + 1, raw_output[:300])
 
+        # Extract any prose reasoning that appears BEFORE the SQL block — most
+        # non-thinking models write a natural-language plan ("I'll join X and Y…")
+        # before emitting the fenced SQL. Capture it as user-facing reasoning.
+        prose = re.split(r"```|\bSELECT\b|\bWITH\b", raw_output, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        if prose and len(prose) > 20:
+            from app.utils.user_logger import log_pipeline_event
+            log_pipeline_event("LLM_REASONING", f"[writer attempt {retry+1}] {prose[:500]}")
+
         sql, err = _extract_sql(raw_output)
         if err:
             log.warning("Writer output rejected in %.1fs: %s", elapsed, err)
@@ -1944,7 +2111,10 @@ def validate_tables(state: DbPipelineState) -> dict:
         log.warning("validate_tables FAIL: %s", err)
         return {"table_error": err}
 
-    log.info("validate_tables PASS (referenced: %s)", sorted(referenced))
+    tables_str = ", ".join(sorted(referenced))
+    log.info("validate_tables PASS | tables queried: %s", tables_str)
+    from app.utils.user_logger import log_pipeline_event
+    log_pipeline_event("DB_SQL_TABLES", f"tables queried: {tables_str}")
     return {"table_error": ""}
 
 
@@ -2141,12 +2311,19 @@ def _make_critique_sql_node(llm: ChatOllama):
             "[repair %d/%d] Critic invoked. Error: %s",
             retry + 1, _MAX_RETRIES, _clip(error, 160),
         )
+        from app.utils.user_logger import log_pipeline_event
+        log_pipeline_event("LLM_CRITIC", f"[repair {retry+1}] error: {_clip(error, 200)}")
         t0 = time.monotonic()
         response  = llm.invoke_streaming([
             SystemMessage(content=system_msg),
             HumanMessage(content=user_msg),
         ])
         elapsed   = time.monotonic() - t0
+
+        # Log critic's prose reasoning (the explanation of what went wrong)
+        critic_prose = re.split(r"```|\bSELECT\b|\bWITH\b", response.content, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        if critic_prose and len(critic_prose) > 20:
+            log_pipeline_event("LLM_REASONING", f"[critic repair {retry+1}] {critic_prose[:500]}")
 
         fixed_sql, extract_err = _extract_sql(response.content)
         if extract_err:
@@ -2321,7 +2498,11 @@ def execute_sql(state: DbPipelineState) -> dict:
             rows, cols = execute(sql)
         rows = _resolve_month_names(rows, cols)
         rows = _sort_by_month_order(rows, cols)
-        log.info("execute_sql OK: %d rows, %d cols in %.1fs", len(rows), len(cols), time.monotonic() - t0)
+        elapsed = time.monotonic() - t0
+        log.info("execute_sql OK: %d rows, %d cols in %.1fs", len(rows), len(cols), elapsed)
+        from app.utils.user_logger import log_pipeline_event
+        log_pipeline_event("DB_SQL", sql[:300].replace("\n", " "))
+        log_pipeline_event("DB_RESULT", f"{len(rows)} rows, {len(cols)} cols in {elapsed:.1f}s | cols: {', '.join(str(c) for c in cols)}")
         return {"rows": rows, "cols": cols, "sql_error": ""}
     except Exception as exc:
         log.error("execute_sql FAIL in %.1fs: %s", time.monotonic() - t0, exc)
@@ -2332,7 +2513,29 @@ def execute_sql(state: DbPipelineState) -> dict:
 # Node 7 — Format answer (never leaks SQL)
 # ---------------------------------------------------------------------------
 
-_FMT_SYSTEM = """\
+def _build_fmt_system(language: str = "en") -> str:
+    """Render the DB-pipeline format-answer system prompt with localized section headings."""
+    is_fr = (language == "fr")
+    h_summary       = "Résumé"                  if is_fr else "Summary"
+    h_analysis      = "Analyse"                 if is_fr else "Analysis"
+    h_key_insights  = "Aperçus clés"            if is_fr else "Key Insights"
+    h_data_source   = "Source des données"      if is_fr else "Data Source"
+    h_followup      = "Question de suivi"       if is_fr else "Follow-up"
+    h_quarterly     = "Tendance trimestrielle"  if is_fr else "Quarterly Trend"
+    h_trend_signal  = "Signal de tendance"      if is_fr else "Trend Signal"
+    return _FMT_SYSTEM_TEMPLATE.format(
+        h_summary=h_summary,
+        h_analysis=h_analysis,
+        h_key_insights=h_key_insights,
+        h_data_source=h_data_source,
+        h_followup=h_followup,
+        h_quarterly=h_quarterly,
+        h_trend_signal=h_trend_signal,
+        language_instruction="{language_instruction}",  # preserved for downstream .format()
+    )
+
+
+_FMT_SYSTEM_TEMPLATE = """\
 You are a senior financial analyst at a management consulting firm presenting database query results to the executive committee of Moov Benin (a West African telecom operator).
 
 CURRENCY: All monetary values are in FCFA (West African CFA franc). NEVER write $ or USD.
@@ -2363,15 +2566,15 @@ OUTPUT FORMAT — use EXACTLY this structure (no deviations):
 
 ## [Short descriptive title — 4–8 words, e.g. "Monthly CapEx Trend — 2025", "Top Suppliers by Spend — 2024", "EBITDA vs Budget Variance — Q1 2025"]
 
-**Summary**
+**{h_summary}**
 [2–3 sentences. State the single most important finding first, with the exact number from DATA FACTS. Then state trend direction and period. Be direct — no preamble like "Based on" or "The data shows".]
 
 [Reproduce the data table exactly as provided — do not reformat, reorder, or omit rows. Keep all pipe characters.]
 
-**Analysis**
+**{h_analysis}**
 [3–5 sentences of business reasoning. Go beyond restating facts: explain the WHY. What drives the peak or trough? Are there seasonal or cyclical patterns typical in West African telecom (e.g. budget cycles, infrastructure rollout seasons, rainy season subscriber churn)? What does the trend imply for next quarter? If this is a supplier/vendor ranking, comment on concentration risk or dependency. If it is a P&L or EBITDA metric, link the movement to likely operational causes. Draw inferences — do not re-list numbers already in the table.]
 
-**Key Insights**
+**{h_key_insights}**
 - **[Label]**: [value + % share or YoY context] — [one-sentence business implication or risk/opportunity]
 - **[Label]**: [second finding with magnitude] — [operational or strategic implication]
 - **[Label]**: [trend or pattern observed] — [what it signals for the next period]
@@ -2384,14 +2587,14 @@ OUTPUT FORMAT — use EXACTLY this structure (no deviations):
   or "N/A — Single quarter precludes YoY comparison". Silence is better than a meaningless N/A bullet.
   Replace any missing bullet with an observation that IS supported by the data (magnitude, trend, share).
 
-**Data Source**: [table(s) queried] | [key columns: list from "Columns in result"] | [period: infer from data or query context] | [N rows returned]
+**{h_data_source}**: [table(s) queried] | [key columns: list from "Columns in result"] | [period: infer from data or query context] | [N rows returned]
 
-**Follow-up**: [One specific drill-down question that would identify root cause or support a decision — not generic like "Would you like more detail?"]
+**{h_followup}**: [One specific drill-down question that would identify root cause or support a decision — not generic like "Would you like more detail?"]
 
 QUARTERLY VARIANCE RULE — applies when result columns include q1_variance, q2_variance, q3_variance, q4_variance:
   The prompt will include a line "QUARTERLY DATA AVAILABILITY: Data available: Q1 (Jan–Mar), Q2 (Apr–Jun) | No data yet: Q3 (Jul–Sep), Q4 (Oct–Dec)" (exact quarters vary).
 
-  After the main table, insert a "**Quarterly Trend**" section (before Analysis):
+  After the main table, insert a "**{h_quarterly}**" section (before Analysis):
 
   0. DATA SCOPE — first sentence MUST state which quarters are covered and which are pending:
      "Analysis covers [available quarters] ([months]). [missing quarters] data not yet available."
@@ -2415,7 +2618,7 @@ QUARTERLY VARIANCE RULE — applies when result columns include q1_variance, q2_
      - WORSENING → "Escalation recommended: variance is accelerating — review cost authorisation thresholds."
      - MIXED     → "Investigate Q[N] spike before drawing conclusions on structural trend."
 
-  Key Insights must include one bullet labelled **Trend Signal** that states: direction + quarters covered + projection.
+  Key Insights must include one bullet labelled **{h_trend_signal}** that states: direction + quarters covered + projection.
 
 STRICT RULES:
 - The ## title MUST reflect the actual question topic and period.
@@ -2506,6 +2709,45 @@ def _compute_trend_analysis(rows: list[dict], x_key: str, y_key: str | None) -> 
         sign = "+" if overall_change_pct > 0 else ""
         parts.append(f"Net change from first to last period: {sign}{overall_change_pct:.1f}%.")
     return " ".join(parts)
+
+
+def _chart_spec_key(spec: dict) -> str:
+    """Canonical structural key for a chart spec — used to dedupe near-identical specs
+    the LLM may emit twice with slightly different cosmetic fields.
+
+    Hashes ONLY the load-bearing fields (chart_type, x_key, y_keys, data). Two specs
+    with the same data but different titles, colors, labels, or trend prose collide
+    on this key and only the first is kept.
+    """
+    try:
+        structural = {
+            "chart_type": spec.get("chart_type"),
+            "x_key":      spec.get("x_key"),
+            "y_keys":     sorted(spec.get("y_keys") or []),
+            "data":       spec.get("data"),
+        }
+        return json.dumps(structural, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        return repr(spec)
+
+
+def _collect_chart_specs(messages: list) -> list[dict]:
+    """Extract chart specs from tool messages, dropping exact duplicates."""
+    specs: list[dict] = []
+    seen: set[str] = set()
+    for msg in messages:
+        if getattr(msg, "name", None) != "generate_chart_spec":
+            continue
+        try:
+            spec = json.loads(msg.content)
+        except Exception:
+            continue
+        key = _chart_spec_key(spec)
+        if key in seen:
+            continue
+        seen.add(key)
+        specs.append(spec)
+    return specs
 
 
 def _build_chart_spec(cols: list[str], rows: list[dict], question: str) -> dict | None:
@@ -2791,12 +3033,14 @@ def _format_fallback(rows: list[dict], cols: list[str], question: str,
         followup_text  = "Souhaitez-vous filtrer ou approfondir ces résultats ?"
         note           = f"(Réponse générée sans IA — {len(rows)} ligne(s) récupérée(s))"
         insights_label = "Points clés"
+        summary_label  = "Résumé"
     else:
         source_label   = "Source"
         followup_label = "Follow-up"
         followup_text  = "Would you like to filter or drill down into these results?"
         note           = f"(Response generated without AI narration — {len(rows)} row(s) returned)"
         insights_label = "Key Insights"
+        summary_label  = "Summary"
 
     # Extract DATA FACTS bullets for Key Insights
     bullets: list[str] = []
@@ -2812,7 +3056,7 @@ def _format_fallback(rows: list[dict], cols: list[str], question: str,
 
     answer = (
         f"## {title}\n\n"
-        f"**Summary**\n{summary_text}\n\n"
+        f"**{summary_label}**\n{summary_text}\n\n"
         f"{table}\n\n"
         f"**{insights_label}**\n{bullets_text}\n\n"
         f"**{source_label}**: {source}\n\n"
@@ -2842,9 +3086,61 @@ def _source_context(sql: str, rows: list[dict], cols: list[str]) -> str:
 
 
 _LANG_INSTRUCTIONS = {
-    "fr": "Répondez en français. Toutes les réponses, analyses et libellés doivent être en français.",
-    "en": "Respond in English.",
+    "fr": (
+        "LANGUE DE RÉPONSE — CRITIQUE : Répondez ENTIÈREMENT en français, peu importe la langue de la question. "
+        "Tous les titres de sections, libellés de colonnes, puces, étiquettes et phrases doivent être en français. "
+        "Si la question est en anglais, traduisez votre réponse complète en français — ne laissez aucun mot en anglais."
+    ),
+    "en": (
+        "OUTPUT LANGUAGE — CRITICAL: Respond ENTIRELY in English, regardless of which language the question was asked in. "
+        "All section headings, column labels, bullets, captions, and sentences must be in English. "
+        "If the question is in French, translate your full response into English — leave no French words."
+    ),
 }
+
+
+# Bidirectional EN ↔ FR map for the section headings the LLM is supposed to emit.
+# Used to post-process the LLM's answer so headings are always in the selected language,
+# even when the model ignores the system prompt's language directive.
+_HEADING_TRANSLATIONS: list[tuple[str, str]] = [
+    # File-upload agent (## H2)
+    ("## Answer",                 "## Réponse"),
+    ("## Analysis",               "## Analyse"),
+    ("## Insights & Next Step",   "## Aperçus et prochaine étape"),
+    # Bold inline labels in the Insights bullets
+    ("**What it means**",         "**Ce que cela signifie**"),
+    ("**Suggested follow-up**",   "**Suivi suggéré**"),
+    # DB pipeline format
+    ("**Summary**",               "**Résumé**"),
+    ("**Analysis**",               "**Analyse**"),
+    ("**Key Insights**",          "**Aperçus clés**"),
+    ("**Data Source**",           "**Source des données**"),
+    ("**Follow-up**",             "**Question de suivi**"),
+    ("**Quarterly Trend**",       "**Tendance trimestrielle**"),
+    ("**Trend Signal**",          "**Signal de tendance**"),
+    # Term-reference labels (definition path)
+    ("*Category:",                "*Catégorie:"),
+    ("**Formula:**",              "**Formule:**"),
+    ("**Unit:**",                 "**Unité:**"),
+    ("**Context:**",              "**Contexte:**"),
+]
+
+
+def _translate_headings(text: str, target_lang: str) -> str:
+    """Replace canonical section headings with the target-language version.
+
+    This is a deterministic safety net for when the LLM ignores the prompt's language
+    directive and emits English headings under a French request (or vice versa).
+    Only swaps known labels — never touches body prose, numbers, or table content.
+    """
+    if not text or target_lang not in ("en", "fr"):
+        return text
+    out = text
+    for en, fr in _HEADING_TRANSLATIONS:
+        src, dst = (en, fr) if target_lang == "fr" else (fr, en)
+        if src in out:
+            out = out.replace(src, dst)
+    return out
 
 _QUARTER_MONTHS = {
     "q1_variance": ("Q1", "Jan–Mar"),
@@ -2930,7 +3226,7 @@ def _make_format_answer_node(llm: ChatOllama):
             log.info("format_answer: data facts injected:\n%s", facts)
 
         lang_instr = _LANG_INSTRUCTIONS.get(lang, _LANG_INSTRUCTIONS["en"])
-        fmt_system = _FMT_SYSTEM.format(language_instruction=lang_instr)
+        fmt_system = _build_fmt_system(language=lang).format(language_instruction=lang_instr)
 
         snapshot_ctx  = f"Database snapshot: {snapshot_label}\n" if snapshot_label else ""
         col_ctx       = f"Columns in result: {', '.join(cols)}\n" if cols else ""
@@ -3073,10 +3369,12 @@ GUIDING RULE: if the question is about anything other than Moov Benin's financia
 metrics, KPIs, regulatory/legal context, or telecom operations, classify it as
 `other` (general knowledge, greetings, creative tasks, translations, etc.).
 
-Respond with ONLY one word — the label itself. No punctuation, no explanation.
+Respond in EXACTLY this two-line format:
+LABEL: <one of: definition, data_query, both, out_of_scope, other>
+REASON: <one short sentence (max 20 words) explaining why>
 
 Question: {question}
-Classification:"""
+Response:"""
 
 
 _OUT_OF_SCOPE_TEMPLATE_EN = """\
@@ -3196,8 +3494,11 @@ def _classify_question_intent(llm: OllamaLLM, question: str) -> str:
         "quelle réglementation", "triggered by", "déclenchée par",
     )
     q_lower = question.lower()
-    if any(kw in q_lower for kw in _OOS_KEYWORDS):
-        log.info("Question pre-classified as out_of_scope via keyword match")
+    matched_kw = next((kw for kw in _OOS_KEYWORDS if kw in q_lower), None)
+    if matched_kw:
+        log.info("Question pre-classified as out_of_scope via keyword match: %r", matched_kw)
+        from app.utils.user_logger import log_pipeline_event
+        log_pipeline_event("CLASSIFY", f"intent: out_of_scope | reason: matched regulatory/legal keyword {matched_kw!r}")
         return "out_of_scope"
 
     try:
@@ -3206,14 +3507,29 @@ def _classify_question_intent(llm: OllamaLLM, question: str) -> str:
             SystemMessage(content="You are a question classifier."),
             HumanMessage(content=prompt),
         ])
-        classification = response.content.strip().lower()
+        raw = response.content.strip()
+
+        # Parse LABEL: ... / REASON: ... format (with backward-compat for one-word output)
+        label_match  = re.search(r"LABEL\s*:\s*(\w+)",        raw, re.IGNORECASE)
+        reason_match = re.search(r"REASON\s*:\s*(.+?)(?:\n|$)", raw, re.IGNORECASE | re.DOTALL)
+        if label_match:
+            classification = label_match.group(1).strip().lower()
+            reason         = reason_match.group(1).strip() if reason_match else ""
+        else:
+            classification = raw.split()[0].strip().lower() if raw else ""
+            reason         = ""
 
         valid = ("definition", "data_query", "both", "out_of_scope", "other")
         if classification not in valid:
-            log.warning("Unexpected classification output: %s — defaulting to data_query", classification)
+            log.warning("Unexpected classification output: %s — defaulting to data_query", raw[:120])
+            from app.utils.user_logger import log_pipeline_event
+            log_pipeline_event("CLASSIFY", f"intent: data_query (fallback; raw={raw[:120]!r})")
             return "data_query"
 
-        log.info("Question classified as: %s", classification)
+        log.info("Question classified as: %s | reason: %s", classification, reason[:200])
+        from app.utils.user_logger import log_pipeline_event
+        detail = f"intent: {classification}" + (f" | reason: {reason[:200]}" if reason else "")
+        log_pipeline_event("CLASSIFY", detail)
         return classification
     except Exception as exc:
         log.warning("Classification failed (%s) — defaulting to data_query", exc)
@@ -3263,18 +3579,24 @@ def _format_term_reference(entry: dict, language: str) -> str:
     definition_key = f"definition_{lang}"
     definition = entry.get(definition_key) or entry.get("definition_en", "")
 
+    is_fr = (lang == "fr")
+    lbl_category = "Catégorie" if is_fr else "Category"
+    lbl_formula  = "Formule"   if is_fr else "Formula"
+    lbl_unit     = "Unité"     if is_fr else "Unit"
+    lbl_context  = "Contexte"  if is_fr else "Context"
+
     lines = [
         f"**{entry['term']}**",
-        f"*Category: {entry.get('category', '')}*",
+        f"*{lbl_category}: {entry.get('category', '')}*",
         "",
         definition,
     ]
     if formula := entry.get("formula"):
-        lines += ["", f"**Formula:** `{formula}`"]
+        lines += ["", f"**{lbl_formula}:** `{formula}`"]
     if unit := entry.get("unit"):
-        lines += [f"**Unit:** {unit}"]
+        lines += [f"**{lbl_unit}:** {unit}"]
     if context := entry.get("context"):
-        lines += ["", f"**Context:** {context}"]
+        lines += ["", f"**{lbl_context}:** {context}"]
     return "\n".join(lines)
 
 
@@ -3305,11 +3627,12 @@ def _get_definition_answer(question: str, llm: OllamaLLM, language: str = "en", 
         log.info("Term reference found: %s", term_entry["term"])
         reference_block = _format_term_reference(term_entry, language)
         system_content = (
+            f"{lang_instr}\n\n"
             "You are a financial analyst expert for Moov Benin. "
             f"{scope_instruction} "
             "Use the following authoritative reference. "
             "You may expand with telecom/Benin context but do not contradict the reference. "
-            f"{lang_instr}\n\n"
+            f"\n\n{lang_instr}\n\n"
             "--- REFERENCE ---\n"
             f"{reference_block}\n"
             "--- END REFERENCE ---"
@@ -3317,10 +3640,11 @@ def _get_definition_answer(question: str, llm: OllamaLLM, language: str = "en", 
     else:
         log.info("No term reference found — using LLM knowledge only")
         system_content = (
+            f"{lang_instr}\n\n"
             "You are a financial analyst expert for Moov Benin. "
             f"{scope_instruction} "
             f"Include practical examples relevant to telecom/financial services in Benin. "
-            f"{lang_instr}"
+            f"\n\n{lang_instr}"
         )
 
     # When definition_only, extract just the term name to avoid the LLM seeing
@@ -3364,21 +3688,23 @@ def _get_definition_tokens(question: str, llm: OllamaLLM, language: str = "en", 
     if term_entry:
         reference_block = _format_term_reference(term_entry, language)
         system_content = (
+            f"{lang_instr}\n\n"
             "You are a financial analyst expert for Moov Benin. "
             f"{scope_instruction} "
             "Use the following authoritative reference. "
             "You may expand with telecom/Benin context but do not contradict the reference. "
-            f"{lang_instr}\n\n"
+            f"\n\n{lang_instr}\n\n"
             "--- REFERENCE ---\n"
             f"{reference_block}\n"
             "--- END REFERENCE ---"
         )
     else:
         system_content = (
+            f"{lang_instr}\n\n"
             "You are a financial analyst expert for Moov Benin. "
             f"{scope_instruction} "
             f"Include practical examples relevant to telecom/financial services in Benin. "
-            f"{lang_instr}"
+            f"\n\n{lang_instr}"
         )
 
     if definition_only and term_entry:
@@ -3541,6 +3867,7 @@ async def run_db_agent(
     if definition_prefix:
         answer = definition_prefix + "\n\n---\n\n" + answer
 
+    answer = _translate_headings(answer, language)
     history_entry = f"User: {message}"
     if sql:
         history_entry += f"\nSQL:\n{sql}"
@@ -3761,7 +4088,7 @@ async def run_db_agent_stream(
     facts      = _compute_data_facts(cols, rows) if rows else ""
     source     = _source_context(current_state.get("sql",""), rows, cols)
     lang_instr = _LANG_INSTRUCTIONS.get(language, _LANG_INSTRUCTIONS["en"])
-    fmt_system = _FMT_SYSTEM.format(language_instruction=lang_instr)
+    fmt_system = _build_fmt_system(language=language).format(language_instruction=lang_instr)
     table      = _build_ascii_table(rows, cols) if rows else ""
 
     snapshot_label = current_state.get("snapshot_label", "")
@@ -3795,11 +4122,12 @@ async def run_db_agent_stream(
     except Exception as exc:
         log.error("Streaming format_answer failed: %s", exc)
         fallback = _format_fallback(rows, cols, message, facts, source, chart_spec, language)
-        fallback_text = fallback["answer"]
+        fallback_text = _translate_headings(fallback["answer"], language)
         full_answer = fallback_text
         yield _sse("token", {"text": fallback_text})
 
     full_answer = (definition_prefix + full_answer) if definition_prefix else full_answer
+    full_answer = _translate_headings(full_answer, language)
     sql = current_state.get("sql", "")
     tables_queried = sorted(_referenced_tables(sql)) if sql else []
     row_count = len(rows)
@@ -3824,6 +4152,7 @@ async def run_db_agent_stream(
         "tables_queried": tables_queried,
         "row_count": row_count,
         "cache_hit": False,
+        "final_answer": full_answer,
     })
 
 
@@ -3848,9 +4177,17 @@ async def run_agent(
     metric_hints: list[dict] | None = None,
 ) -> dict:
     t_start   = time.monotonic()
-    graph     = get_or_create_graph(session_id, parsed_data, model=model)
+    graph     = get_or_create_graph(session_id, parsed_data, model=model, language=language)
     thread_id = f"{session_id}:{conversation_id}"
     config    = {"configurable": {"thread_id": thread_id}}
+
+    # Snapshot prior message count so we only collect charts from THIS turn
+    # (LangGraph's MemorySaver returns the full thread history on every invoke).
+    try:
+        prev_state = graph.get_state(config)
+        prev_msg_count = len(prev_state.values.get("messages", [])) if prev_state and prev_state.values else 0
+    except Exception:
+        prev_msg_count = 0
 
     lang_instr = _LANG_INSTRUCTIONS.get(language, _LANG_INSTRUCTIONS["en"])
     hint_prefix = _build_hint_prefix(metric_hints or [])
@@ -3863,20 +4200,16 @@ async def run_agent(
 
     inference_time = round(time.monotonic() - t_start, 2)
     messages = result.get("messages", [])
+    new_messages = messages[prev_msg_count:]
 
-    chart_specs = []
-    for msg in messages:
-        if getattr(msg, "name", None) == "generate_chart_spec":
-            try:
-                chart_specs.append(json.loads(msg.content))
-            except Exception:
-                pass
+    chart_specs = _collect_chart_specs(new_messages)
 
-    for msg in reversed(messages):
+    for msg in reversed(new_messages):
         if isinstance(msg, AIMessage) and msg.content and not getattr(msg, "tool_calls", None):
-            return {"answer": msg.content, "inference_time": inference_time, "charts": chart_specs}
+            return {"answer": _translate_headings(msg.content, language), "inference_time": inference_time, "charts": chart_specs}
 
-    return {"answer": "I was unable to generate a response. Please try again.", "inference_time": inference_time, "charts": chart_specs}
+    fallback_text = "Je n'ai pas pu générer de réponse. Veuillez réessayer." if language == "fr" else "I was unable to generate a response. Please try again."
+    return {"answer": fallback_text, "inference_time": inference_time, "charts": chart_specs}
 
 
 async def run_agent_stream(
@@ -3899,7 +4232,7 @@ async def run_agent_stream(
 
     t_start = time.monotonic()
     try:
-        graph = get_or_create_graph(session_id, parsed_data, model=model)
+        graph = get_or_create_graph(session_id, parsed_data, model=model, language=language)
         thread_id = f"{session_id}:{conversation_id}"
         config = {"configurable": {"thread_id": thread_id}}
 
@@ -3907,7 +4240,8 @@ async def run_agent_stream(
         hint_prefix = _build_hint_prefix(metric_hints or [])
         augmented = f"[{lang_instr}]\n{hint_prefix}{message}"
 
-        chart_specs = []
+        chart_specs: list[dict] = []
+        seen_chart_keys: set[str] = set()
         final_answer = ""
 
         async for delta in graph.astream(
@@ -3924,12 +4258,17 @@ async def run_agent_stream(
                             yield _sse("progress", {"message": f"Calling {tool_name.replace('_', ' ')}…"})
                     elif getattr(msg, "name", None) == "generate_chart_spec":
                         try:
-                            chart_specs.append(_j.loads(msg.content))
+                            spec = _j.loads(msg.content)
+                            key = _chart_spec_key(spec)
+                            if key not in seen_chart_keys:
+                                seen_chart_keys.add(key)
+                                chart_specs.append(spec)
                         except Exception:
                             pass
                     elif isinstance(msg, AIMessage) and msg.content and not getattr(msg, "tool_calls", None):
                         final_answer = msg.content
 
+        final_answer = _translate_headings(final_answer, language)
         yield _sse("token", {"text": final_answer})
         inference_time = round(time.monotonic() - t_start, 2)
         yield _sse("done", {"inference_time": inference_time, "charts": chart_specs})

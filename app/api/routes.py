@@ -22,6 +22,7 @@ GET    /api/v1/db/metrics/{sheet}            List metrics for a sheet (from DB)
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -30,9 +31,13 @@ from typing import Annotated
 
 import asyncio as _asyncio
 
+log = logging.getLogger("tbg.routes")
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from app.auth.deps import get_optional_user
 from app.db.auth_store import create_conversation, save_message, touch_conversation
+from app.middleware.rate_limit import rate_limit
+from app.utils.user_logger import log_user_activity
 
 _MODEL_LIST_PATH = Path(__file__).resolve().parent.parent.parent / "model_list.json"
 _THRESHOLDS_PATH = Path(__file__).resolve().parents[2] / "app" / "thresholds.json"
@@ -89,7 +94,7 @@ async def _save_and_parse(upload: UploadFile) -> tuple[str, dict]:
 # ---------------------------------------------------------------------------
 # POST /api/v1/sessions  — single file upload
 # ---------------------------------------------------------------------------
-@router.post("/sessions", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/sessions", response_model=UploadResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(rate_limit("upload"))])
 async def create_session(file: Annotated[UploadFile, File(description="TBG Excel file (.xlsx)")]):
     """
     Upload a single TBG Excel file.  Returns a session_id used for all
@@ -98,9 +103,11 @@ async def create_session(file: Annotated[UploadFile, File(description="TBG Excel
     if not (upload_filename := file.filename or ""):
         raise HTTPException(status_code=400, detail="File has no filename.")
 
+    log.info("create_session: receiving file=%s", upload_filename)
     _, parsed = await _save_and_parse(file)
 
     if not parsed.get("sheets"):
+        log.warning("create_session: no TBG sheets parsed from file=%s", upload_filename)
         raise HTTPException(
             status_code=422,
             detail="Could not parse any TBG sheets from the uploaded file. "
@@ -109,14 +116,17 @@ async def create_session(file: Annotated[UploadFile, File(description="TBG Excel
 
     all_periods = parsed.get("all_periods", [])
     latest_period = all_periods[-1] if all_periods else ""
+    log.info("create_session: parsed %d sheets, %d periods from file=%s", len(parsed["sheets"]), len(all_periods), upload_filename)
+
     alerts: list[dict] = []
     if latest_period:
         try:
             with open(_THRESHOLDS_PATH) as _tf:
                 thresholds = json.load(_tf)
             alerts = run_alerts_check(parsed, thresholds, latest_period)
-        except Exception:
-            pass
+            log.info("create_session: %d alert(s) generated for period=%s", len(alerts), latest_period)
+        except Exception as e:
+            log.warning("create_session: alert check failed: %s", e)
 
     session_id = str(uuid.uuid4())
     _sessions[session_id] = {
@@ -228,8 +238,9 @@ async def create_comparison_session(
 # ---------------------------------------------------------------------------
 # POST /api/v1/sessions/{session_id}/chat
 # ---------------------------------------------------------------------------
-@router.post("/sessions/{session_id}/chat", response_model=ChatResponse)
-async def chat(session_id: str, request: ChatRequest):
+@router.post("/sessions/{session_id}/chat", response_model=ChatResponse, dependencies=[Depends(rate_limit("chat"))])
+async def chat(session_id: str, request: ChatRequest,
+               optional_user: dict | None = Depends(get_optional_user)):
     """
     Send a message to the TBG AI Copilot for the given session.
 
@@ -243,6 +254,14 @@ async def chat(session_id: str, request: ChatRequest):
     session = _require_session(session_id)
     parsed_data = session["parsed_data"]
 
+    log.info("chat: session_id=%s conv_id=%s lang=%s message=%r", session_id, request.conversation_id, request.language, request.message[:120])
+    if optional_user:
+        from app.config.settings import request_user_id, request_user_email, request_user_role
+        request_user_id.set(optional_user["id"])
+        request_user_email.set(optional_user["email"])
+        request_user_role.set(optional_user.get("role", "viewer"))
+        log_user_activity(optional_user["id"], optional_user["email"], optional_user.get("role", "viewer"),
+                          "FILE_CHAT", f"session={session_id} | {request.message[:200]}")
     hints = [h.model_dump() for h in request.metric_hints] if request.metric_hints else None
     try:
         agent_result = await run_agent(
@@ -254,8 +273,12 @@ async def chat(session_id: str, request: ChatRequest):
             language=request.language,
             metric_hints=hints,
         )
-        print(f"Agent response for session {session_id}:\n{agent_result['answer']}\n")
+        log.info("chat: done session_id=%s inference_time=%.2fs", session_id, agent_result.get("inference_time") or 0)
+        if optional_user:
+            log_user_activity(optional_user["id"], optional_user["email"], optional_user.get("role", "viewer"),
+                              "FILE_CHAT", f"session={session_id} | {request.message[:120]}")
     except Exception as exc:
+        log.error("chat: agent error session_id=%s: %s", session_id, exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Agent error: {str(exc)}",
@@ -480,7 +503,7 @@ async def health():
 # ---------------------------------------------------------------------------
 # POST /api/v1/db/chat
 # ---------------------------------------------------------------------------
-@router.post("/db/chat", response_model=ChatResponse)
+@router.post("/db/chat", response_model=ChatResponse, dependencies=[Depends(rate_limit("chat"))])
 async def db_chat(
     request: ChatRequest,
     http_request: Request,
@@ -505,9 +528,20 @@ async def db_chat(
     from app.db.auth_store import log_policy_block
     user_role = (optional_user or {}).get("role", "viewer")
     request_user_role.set(user_role)
+    log.info("db_chat: user_id=%s role=%s message=%r", (optional_user or {}).get("id", "anon"), user_role, request.message[:120])
+    if optional_user:
+        from app.config.settings import request_user_id, request_user_email
+        request_user_id.set(optional_user["id"])
+        request_user_email.set(optional_user["email"])
+        log_user_activity(optional_user["id"], optional_user["email"], user_role,
+                          "DB_CHAT", request.message[:200])
     allowed, blocked_term = check_question(user_role, request.message)
     if not allowed:
+        log.warning("db_chat: RBAC block user_id=%s role=%s blocked_by=%r message=%r",
+                    (optional_user or {}).get("id", "anon"), user_role, blocked_term, request.message[:80])
         if optional_user:
+            log_user_activity(optional_user["id"], optional_user["email"], user_role,
+                              "RBAC_BLOCK", f"blocked_by={blocked_term!r} | {request.message[:120]}")
             await _asyncio.to_thread(
                 log_policy_block, optional_user["id"], user_role,
                 request.message, blocked_term, "keyword block (db_chat)"
@@ -587,7 +621,7 @@ async def db_chat(
 # ---------------------------------------------------------------------------
 # POST /api/v1/sessions/{session_id}/chat/stream
 # ---------------------------------------------------------------------------
-@router.post("/sessions/{session_id}/chat/stream")
+@router.post("/sessions/{session_id}/chat/stream", dependencies=[Depends(rate_limit("chat"))])
 async def session_chat_stream(session_id: str, request: ChatRequest):
     """
     Streaming version of /sessions/{id}/chat using Server-Sent Events.
@@ -629,7 +663,7 @@ async def session_chat_stream(session_id: str, request: ChatRequest):
 # ---------------------------------------------------------------------------
 from fastapi.responses import StreamingResponse as FastAPIStreamingResponse
 
-@router.post("/db/chat/stream")
+@router.post("/db/chat/stream", dependencies=[Depends(rate_limit("chat"))])
 async def db_chat_stream(
     request: ChatRequest,
     http_request: Request,
@@ -654,9 +688,19 @@ async def db_chat_stream(
     from app.db.auth_store import log_policy_block
     user_role = (optional_user or {}).get("role", "viewer")
     request_user_role.set(user_role)
+
+    if optional_user:
+        from app.config.settings import request_user_id, request_user_email
+        request_user_id.set(optional_user["id"])
+        request_user_email.set(optional_user["email"])
+        log_user_activity(optional_user["id"], optional_user["email"], user_role,
+                          "DB_CHAT", request.message[:200])
+
     allowed, blocked_term = check_question(user_role, request.message)
     if not allowed:
         if optional_user:
+            log_user_activity(optional_user["id"], optional_user["email"], user_role,
+                              "RBAC_BLOCK", f"blocked_by={blocked_term!r} | {request.message[:120]}")
             await _asyncio.to_thread(
                 log_policy_block, optional_user["id"], user_role,
                 request.message, blocked_term, "keyword block (db_chat_stream)"
@@ -732,8 +776,15 @@ async def db_chat_stream(
         except Exception as exc:
             yield f"event: error\ndata: {_json.dumps({'detail': str(exc)})}\n\n"
 
+    import contextvars
+    ctx = contextvars.copy_context()
+
+    async def event_generator_with_ctx():
+        async for chunk in ctx.run(event_generator):
+            yield chunk
+
     return FastAPIStreamingResponse(
-        event_generator(),
+        event_generator_with_ctx(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

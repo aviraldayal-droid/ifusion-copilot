@@ -9,6 +9,7 @@ Metric code pattern: PL1, Opex3, CA10, PARC7, CAP4 (letters + digits).
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,8 @@ from typing import Any
 
 import openpyxl
 import yaml
+
+log = logging.getLogger("tbg.parser")
 
 _SECTION_MAPPINGS_PATH = Path(__file__).parent / "section_mappings.yaml"
 _section_overrides_cache: dict[str, list[dict]] | None = None
@@ -213,6 +216,7 @@ def _parse_sheet(ws) -> dict:
 
     date_row_idx, date_cols = _find_date_row(all_rows)
     if date_row_idx < 0 or not date_cols:
+        log.debug("_parse_sheet: no date row found in sheet=%s", getattr(ws, "title", "?"))
         return {}
 
     min_date_col = min(date_cols.keys())
@@ -269,20 +273,27 @@ def parse_tbg_file(file_path: str) -> dict:
     Parse a TBG Excel file. Returns:
       { "file": "...", "all_periods": [...], "sheets": { "pnl_conso": {...}, ... } }
     """
+    fname = file_path.split("/")[-1]
+    log.info("parse_tbg_file: opening file=%s", fname)
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
     available = set(wb.sheetnames)
+    log.debug("parse_tbg_file: workbook has %d sheets: %s", len(available), sorted(available))
 
-    result: dict = {"file": file_path.split("/")[-1], "sheets": {}}
+    result: dict = {"file": fname, "sheets": {}}
 
     for sheet_name, sheet_key in SHEETS_OF_INTEREST.items():
         if sheet_name not in available:
+            log.debug("parse_tbg_file: sheet %r not in workbook — skipping", sheet_name)
             continue
         ws = wb[sheet_name]
         parsed = _parse_sheet(ws)
         if parsed:
-            # Apply curated section overrides (for sheets where heuristics fail)
             _apply_section_overrides(sheet_key, parsed.get("metrics", {}))
             result["sheets"][sheet_key] = parsed
+            log.info("parse_tbg_file: sheet=%s metrics=%d periods=%d",
+                     sheet_key, len(parsed.get("metrics", {})), len(parsed.get("periods", [])))
+        else:
+            log.warning("parse_tbg_file: sheet=%s (%r) yielded no data", sheet_key, sheet_name)
 
     wb.close()
 
@@ -291,6 +302,8 @@ def parse_tbg_file(file_path: str) -> dict:
         all_periods.update(sd.get("periods", []))
     result["all_periods"] = sorted(all_periods)
 
+    log.info("parse_tbg_file: done file=%s sheets=%d total_periods=%d",
+             fname, len(result["sheets"]), len(result["all_periods"]))
     return result
 
 

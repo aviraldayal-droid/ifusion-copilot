@@ -4,6 +4,8 @@ TBG AI Copilot — FastAPI application entry point.
 Start with:
     uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 """
+import logging
+import logging.config
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,19 +21,55 @@ from app.api.excel_routes import router as excel_router
 from app.config.settings import settings
 
 _STATIC = Path(__file__).parent / "static"
+_LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
+logging.config.dictConfig({
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "default": {
+            "format": "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "default",
+        },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "default",
+            "filename": str(_LOG_DIR / "app.log"),
+            "maxBytes": 10 * 1024 * 1024,   # 10 MB per file
+            "backupCount": 5,                # keep app.log + 5 rotated copies
+            "encoding": "utf-8",
+        },
+    },
+    "root": {
+        "level": "INFO",
+        "handlers": ["console", "file"],
+    },
+    "loggers": {
+        "tbg": {"level": "DEBUG", "propagate": True},
+        "uvicorn.access": {"level": "WARNING", "propagate": True},
+    },
+})
+
+log = logging.getLogger("tbg.main")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    print(f"Starting {settings.APP_TITLE} v{settings.APP_VERSION}")
+    log.info("Starting %s v%s", settings.APP_TITLE, settings.APP_VERSION)
     if settings.is_ollama_cloud:
-        print(f"LLM: {settings.OLLAMA_MODEL} (OLLAMA CLOUD)")
+        log.info("LLM: %s (OLLAMA CLOUD)", settings.OLLAMA_MODEL)
     else:
-        print(f"LLM: {settings.OLLAMA_MODEL} (LOCAL at {settings.OLLAMA_BASE_URL})")
-    print(f"LangSmith tracing: {'enabled' if settings.LANGSMITH_API_KEY else 'disabled'}")
+        log.info("LLM: %s (LOCAL at %s)", settings.OLLAMA_MODEL, settings.OLLAMA_BASE_URL)
+    log.info("LangSmith tracing: %s", "enabled" if settings.LANGSMITH_API_KEY else "disabled")
     yield
-    # Shutdown — nothing to clean up (sessions are in-memory)
+    log.info("Shutting down %s", settings.APP_TITLE)
 
 
 app = FastAPI(

@@ -28,13 +28,21 @@ CREATE TABLE IF NOT EXISTS public.copilot_users (
     id            SERIAL PRIMARY KEY,
     email         VARCHAR(320) UNIQUE NOT NULL,
     name          VARCHAR(200) NOT NULL,
-    password_hash VARCHAR(200) NOT NULL,
+    password_hash VARCHAR(200),
     session_token VARCHAR(64),
     role          VARCHAR(30)  NOT NULL DEFAULT 'viewer',
+    provider          VARCHAR(20) NOT NULL DEFAULT 'local',
+    provider_subject  VARCHAR(255),
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 ALTER TABLE public.copilot_users ADD COLUMN IF NOT EXISTS session_token VARCHAR(64);
 ALTER TABLE public.copilot_users ADD COLUMN IF NOT EXISTS role VARCHAR(30) NOT NULL DEFAULT 'viewer';
+ALTER TABLE public.copilot_users ADD COLUMN IF NOT EXISTS provider VARCHAR(20) NOT NULL DEFAULT 'local';
+ALTER TABLE public.copilot_users ADD COLUMN IF NOT EXISTS provider_subject VARCHAR(255);
+ALTER TABLE public.copilot_users ALTER COLUMN password_hash DROP NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_copilot_users_provider_subject
+    ON public.copilot_users (provider, provider_subject)
+    WHERE provider_subject IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.copilot_policy_audit (
     id           SERIAL PRIMARY KEY,
@@ -132,11 +140,97 @@ def get_user_by_email(email: str) -> dict | None:
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, email, name, password_hash, session_token, role, created_at FROM public.copilot_users WHERE email = %s",
+                "SELECT id, email, name, password_hash, session_token, role, provider, provider_subject, created_at "
+                "FROM public.copilot_users WHERE email = %s",
                 (email.lower().strip(),),
             )
             row = cur.fetchone()
         return dict(row) if row else None
+    finally:
+        pool.putconn(conn)
+
+
+def upsert_keycloak_user(
+    *,
+    subject: str,
+    email: str,
+    name: str,
+    role: str,
+    email_verified: bool,
+) -> dict:
+    """
+    Find-or-create a user row for a Keycloak identity.
+
+    Lookup order:
+      1. (provider='keycloak', provider_subject=subject) — the canonical match.
+      2. By email — links an existing row to this Keycloak identity. Requires
+         email_verified=True to prevent a Keycloak account from hijacking a
+         local-password account by registering the same email upstream.
+
+    On every call, name and role are refreshed from the token (Keycloak is the
+    source of truth for both). Returns the same shape as get_user_by_email.
+    """
+    ensure_schema()
+    email_norm = email.lower().strip()
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, email, name, password_hash, session_token, role, provider, provider_subject, created_at "
+                "FROM public.copilot_users WHERE provider = 'keycloak' AND provider_subject = %s",
+                (subject,),
+            )
+            row = cur.fetchone()
+
+            if row is None:
+                cur.execute(
+                    "SELECT id, email, name, password_hash, session_token, role, provider, provider_subject, created_at "
+                    "FROM public.copilot_users WHERE email = %s",
+                    (email_norm,),
+                )
+                existing = cur.fetchone()
+                if existing is not None:
+                    if not email_verified:
+                        raise PermissionError(
+                            "Keycloak email is not verified; cannot link to existing account "
+                            f"for email={email_norm}"
+                        )
+                    cur.execute(
+                        """UPDATE public.copilot_users
+                              SET provider = 'keycloak',
+                                  provider_subject = %s,
+                                  name = %s,
+                                  role = %s
+                            WHERE id = %s
+                        RETURNING id, email, name, password_hash, session_token, role, provider, provider_subject, created_at""",
+                        (subject, name.strip()[:200], role, existing["id"]),
+                    )
+                    row = cur.fetchone()
+                else:
+                    cur.execute(
+                        """INSERT INTO public.copilot_users
+                               (email, name, password_hash, role, provider, provider_subject)
+                           VALUES (%s, %s, NULL, %s, 'keycloak', %s)
+                        RETURNING id, email, name, password_hash, session_token, role, provider, provider_subject, created_at""",
+                        (email_norm, name.strip()[:200], role, subject),
+                    )
+                    row = cur.fetchone()
+            else:
+                cur.execute(
+                    """UPDATE public.copilot_users
+                          SET name = %s, role = %s, email = %s
+                        WHERE id = %s
+                    RETURNING id, email, name, password_hash, session_token, role, provider, provider_subject, created_at""",
+                    (name.strip()[:200], role, email_norm, row["id"]),
+                )
+                row = cur.fetchone()
+
+        conn.commit()
+        return dict(row)
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         pool.putconn(conn)
 
@@ -335,6 +429,61 @@ def delete_conversation(conv_id: int, user_id: int) -> bool:
     except Exception:
         conn.rollback()
         raise
+    finally:
+        pool.putconn(conn)
+
+
+# ---------------------------------------------------------------------------
+# Admin helpers
+# ---------------------------------------------------------------------------
+
+def list_users() -> list[dict]:
+    ensure_schema()
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, email, name, role, created_at FROM public.copilot_users ORDER BY created_at DESC"
+            )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        pool.putconn(conn)
+
+
+def delete_user(user_id: int) -> bool:
+    ensure_schema()
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public.copilot_users WHERE id = %s", (user_id,))
+            deleted = cur.rowcount > 0
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
+def get_audit_log(limit: int = 50) -> list[dict]:
+    ensure_schema()
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT a.id, a.user_id, u.email, u.name, a.role, a.question,
+                          a.blocked_by, a.detail, a.created_at
+                   FROM public.copilot_policy_audit a
+                   JOIN public.copilot_users u ON u.id = a.user_id
+                   ORDER BY a.created_at DESC
+                   LIMIT %s""",
+                (limit,),
+            )
+            return [dict(r) for r in cur.fetchall()]
     finally:
         pool.putconn(conn)
 

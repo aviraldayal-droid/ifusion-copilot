@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>iFusion Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:         #F4F4F8;
+      --surface:    #FFFFFF;
+      --surface2:   #EDEDF3;
+      --border:     rgba(0,0,0,0.08);
+      --border-mid: rgba(0,0,0,0.13);
+      --text:       #0F0F14;
+      --muted:      #636374;
+      --muted2:     #9696A8;
+      --accent:     #F97316;
+      --accent-dim: rgba(249,115,22,0.08);
+      --error:      #ef4444;
+      --error-dim:  rgba(239,68,68,0.08);
+      --shadow-sm:  0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+      --shadow-md:  0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
+      --shadow-lg:  0 10px 32px rgba(0,0,0,0.12), 0 4px 8px rgba(0,0,0,0.06);
+    }
+    [data-theme="dark"] {
+      --bg:         #111118;
+      --surface:    #1C1C26;
+      --surface2:   #242432;
+      --border:     rgba(255,255,255,0.07);
+      --border-mid: rgba(255,255,255,0.11);
+      --text:       #E8E8F0;
+      --muted:      #8888A0;
+      --muted2:     #5A5A72;
+      --shadow-sm:  0 1px 3px rgba(0,0,0,0.24);
+      --shadow-md:  0 4px 12px rgba(0,0,0,0.3);
+      --shadow-lg:  0 10px 32px rgba(0,0,0,0.4);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg); color: var(--text);
+      font-size: 15px; -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── LOGIN SCREEN ── */
+    #login-screen {
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: var(--bg);
+    }
+    .login-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 18px; padding: 36px 32px 30px;
+      width: 100%; max-width: 380px; box-shadow: var(--shadow-lg);
+    }
+    .login-logo {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 24px; justify-content: center;
+    }
+    .login-logo-icon {
+      width: 36px; height: 36px; border-radius: 10px;
+      background: linear-gradient(135deg, #F97316, #FDBA74);
+      display: flex; align-items: center; justify-content: center; font-size: 18px; color: #fff;
+    }
+    .login-logo-text { font-size: 1.1rem; font-weight: 700; }
+    .login-logo-sub { font-size: 0.75rem; color: var(--muted); font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
+    .login-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+    .login-field label { font-size: 0.78rem; font-weight: 600; color: var(--muted); }
+    .login-field input {
+      padding: 9px 13px; border-radius: 9px; border: 1px solid var(--border-mid);
+      background: var(--bg); color: var(--text); font-family: inherit; font-size: 0.9rem; outline: none;
+      transition: border-color 0.15s;
+    }
+    .login-field input:focus { border-color: var(--accent); }
+    .login-btn {
+      width: 100%; padding: 10px; border-radius: 9px; border: none;
+      background: var(--accent); color: #fff; font-family: inherit;
+      font-size: 0.92rem; font-weight: 600; cursor: pointer; margin-top: 6px; transition: opacity 0.12s;
+    }
+    .login-btn:hover:not(:disabled) { opacity: 0.88; }
+    .login-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .login-error {
+      display: none; background: var(--error-dim); color: var(--error);
+      border: 1px solid rgba(239,68,68,0.2); border-radius: 8px;
+      padding: 8px 12px; font-size: 0.82rem; margin-top: 12px;
+    }
+    .login-error.show { display: block; }
+
+    /* ── MAIN APP ── */
+    #app { display: none; flex-direction: column; min-height: 100vh; }
+    #app.show { display: flex; }
+
+    /* Header */
+    .app-header {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 0 28px; height: 56px; display: flex; align-items: center;
+      justify-content: space-between; flex-shrink: 0; box-shadow: var(--shadow-sm); position: sticky; top: 0; z-index: 100;
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; }
+    .header-logo-icon {
+      width: 30px; height: 30px; border-radius: 8px;
+      background: linear-gradient(135deg, #F97316, #FDBA74);
+      display: flex; align-items: center; justify-content: center; font-size: 15px; color: #fff;
+    }
+    .header-title { font-size: 0.97rem; font-weight: 700; }
+    .header-pill {
+      font-size: 0.68rem; font-weight: 700; padding: 2px 8px; border-radius: 20px;
+      background: rgba(239,68,68,0.1); color: #ef4444; border: 1px solid rgba(239,68,68,0.25);
+      letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .header-right { display: flex; align-items: center; gap: 14px; }
+    .header-user { font-size: 0.82rem; color: var(--muted); }
+    .header-user strong { color: var(--text); font-weight: 600; }
+    .header-btn {
+      padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border-mid);
+      background: none; color: var(--muted); font-family: inherit; font-size: 0.8rem;
+      cursor: pointer; transition: all 0.12s;
+    }
+    .header-btn:hover { background: var(--surface2); color: var(--text); }
+    .theme-btn { width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-size: 1rem; }
+
+    /* Nav tabs */
+    .app-nav {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 0 28px; display: flex; gap: 4px;
+    }
+    .nav-tab {
+      padding: 10px 18px; border: none; background: none; font-family: inherit;
+      font-size: 0.84rem; font-weight: 600; color: var(--muted); cursor: pointer;
+      border-bottom: 2px solid transparent; margin-bottom: -1px; transition: all 0.12s;
+    }
+    .nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .nav-tab:not(.active):hover { color: var(--text); }
+
+    /* Content */
+    .app-content { flex: 1; padding: 28px; max-width: 1100px; width: 100%; margin: 0 auto; }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    /* Toolbar */
+    .toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+    .toolbar-title { font-size: 0.82rem; font-weight: 600; color: var(--muted); }
+
+    /* Buttons */
+    .btn {
+      padding: 8px 18px; border-radius: 9px; border: none; font-family: inherit;
+      font-size: 0.83rem; font-weight: 600; cursor: pointer; transition: opacity 0.12s;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover:not(:disabled) { opacity: 0.86; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-ghost { background: none; border: 1px solid var(--border-mid); color: var(--muted); }
+    .btn-ghost:hover { background: var(--surface2); color: var(--text); }
+    .btn-danger { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25); color: #ef4444; }
+    .btn-danger:hover { background: rgba(239,68,68,0.16); }
+    .btn-sm { padding: 5px 12px; font-size: 0.77rem; border-radius: 7px; }
+
+    /* Create form */
+    .create-form {
+      display: none; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 13px; padding: 20px 22px; margin-bottom: 20px;
+    }
+    .create-form.show { display: block; }
+    .create-form-title { font-size: 0.88rem; font-weight: 700; margin-bottom: 16px; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .form-full { grid-column: 1 / -1; }
+    .field { display: flex; flex-direction: column; gap: 5px; }
+    .field label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .field input, .field select {
+      padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-mid);
+      background: var(--bg); color: var(--text); font-family: inherit; font-size: 0.87rem; outline: none;
+      transition: border-color 0.15s;
+    }
+    .field input:focus, .field select:focus { border-color: var(--accent); }
+    .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+    /* Flash message */
+    .flash { display: none; padding: 9px 14px; border-radius: 9px; font-size: 0.83rem; margin-bottom: 16px; }
+    .flash.show { display: block; }
+    .flash.success { background: rgba(16,185,129,0.1); color: #059669; border: 1px solid rgba(16,185,129,0.25); }
+    .flash.error   { background: var(--error-dim); color: var(--error); border: 1px solid rgba(239,68,68,0.2); }
+
+    /* Table */
+    .table-wrap { border-radius: 12px; border: 1px solid var(--border); overflow: hidden; background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    thead th {
+      background: var(--surface2); padding: 10px 16px; text-align: left;
+      font-weight: 600; color: var(--muted); font-size: 0.74rem;
+      text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border);
+    }
+    tbody td { padding: 11px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: var(--bg); }
+
+    /* Role select */
+    .role-select {
+      padding: 5px 11px; border-radius: 8px; font-size: 0.8rem; font-weight: 600;
+      border: 1px solid var(--border-mid); background: var(--bg); color: var(--text);
+      font-family: inherit; cursor: pointer; transition: border-color 0.12s; outline: none;
+    }
+    .role-select:focus { border-color: var(--accent); }
+    .role-select.role-admin     { color: #ef4444; border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.06); }
+    .role-select.role-executive { color: #a855f7; border-color: rgba(168,85,247,0.35); background: rgba(168,85,247,0.06); }
+    .role-select.role-manager   { color: #3b82f6; border-color: rgba(59,130,246,0.35); background: rgba(59,130,246,0.06); }
+    .role-select.role-viewer    { color: #6b7280; border-color: rgba(107,114,128,0.3); background: rgba(107,114,128,0.06); }
+
+    /* Badges */
+    .role-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 10px;
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .role-badge.role-admin     { background: rgba(239,68,68,0.12); color: #ef4444; }
+    .role-badge.role-executive { background: rgba(168,85,247,0.12); color: #a855f7; }
+    .role-badge.role-manager   { background: rgba(59,130,246,0.12); color: #3b82f6; }
+    .role-badge.role-viewer    { background: rgba(107,114,128,0.12); color: #6b7280; }
+    .you-badge {
+      font-size: 0.68rem; padding: 1px 6px; border-radius: 5px;
+      background: var(--accent-dim); color: var(--accent); font-weight: 700; margin-left: 6px;
+    }
+
+    /* Audit */
+    .audit-q { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 0.82rem; }
+    .blocked-tag {
+      display: inline-block; font-size: 0.73rem; padding: 2px 9px; border-radius: 6px;
+      font-weight: 600; background: rgba(239,68,68,0.08); color: #ef4444;
+      border: 1px solid rgba(239,68,68,0.2); white-space: nowrap;
+    }
+
+    .empty-state { text-align: center; padding: 48px 0; color: var(--muted); font-size: 0.9rem; }
+
+    /* Stats row */
+    .stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 24px; }
+    .stat-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px 20px; display: flex; flex-direction: column; gap: 4px;
+    }
+    .stat-label { font-size: 0.74rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--text); }
+    .stat-sub { font-size: 0.75rem; color: var(--muted2); }
+  </style>
+</head>
+<body>
+
+<!-- LOGIN SCREEN -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="login-logo-icon">🛡</div>
+      <div>
+        <div class="login-logo-text">iFusion Admin</div>
+        <div class="login-logo-sub">Management Dashboard</div>
+      </div>
+    </div>
+    <div class="login-field">
+      <label>Email</label>
+      <input type="email" id="login-email" placeholder="admin@example.com" onkeydown="if(event.key==='Enter')doLogin()" />
+    </div>
+    <div class="login-field">
+      <label>Password</label>
+      <input type="password" id="login-password" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()" />
+    </div>
+    <button class="login-btn" id="login-btn" onclick="doLogin()">Sign in</button>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app">
+  <header class="app-header">
+    <div class="header-left">
+      <div class="header-logo-icon">🛡</div>
+      <span class="header-title">iFusion Admin</span>
+      <span class="header-pill">Admin Only</span>
+    </div>
+    <div class="header-right">
+      <span class="header-user">Signed in as <strong id="header-name">—</strong></span>
+      <button class="header-btn theme-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">☀️</button>
+      <button class="header-btn" onclick="doLogout()">Sign out</button>
+    </div>
+  </header>
+
+  <nav class="app-nav">
+    <button class="nav-tab active" id="tab-users" onclick="switchTab('users')">Users</button>
+    <button class="nav-tab" id="tab-audit" onclick="switchTab('audit')">Audit Log</button>
+  </nav>
+
+  <main class="app-content">
+
+    <!-- USERS TAB -->
+    <div class="tab-pane active" id="pane-users">
+      <div class="stats-row" id="stats-row">
+        <div class="stat-card">
+          <div class="stat-label">Total Users</div>
+          <div class="stat-value" id="stat-total">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Admins / Executives</div>
+          <div class="stat-value" id="stat-execs">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Managers / Viewers</div>
+          <div class="stat-value" id="stat-restricted">—</div>
+        </div>
+      </div>
+
+      <div id="flash" class="flash"></div>
+
+      <div class="create-form" id="create-form">
+        <div class="create-form-title">Add New User</div>
+        <div class="form-grid">
+          <div class="field">
+            <label>Full Name</label>
+            <input type="text" id="cf-name" placeholder="Jane Doe" />
+          </div>
+          <div class="field">
+            <label>Email</label>
+            <input type="email" id="cf-email" placeholder="jane@example.com" />
+          </div>
+          <div class="field">
+            <label>Password</label>
+            <input type="password" id="cf-password" placeholder="Min 6 characters" />
+          </div>
+          <div class="field">
+            <label>Role</label>
+            <select id="cf-role">
+              <option value="viewer">Viewer — Read-only analyst</option>
+              <option value="manager">Manager — Finance / Dept Head</option>
+              <option value="executive">Executive — CEO / CFO / COO</option>
+              <option value="admin">Admin — Full access</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-ghost" onclick="toggleCreateForm()">Cancel</button>
+          <button class="btn btn-primary" id="cf-btn" onclick="createUser()">Create User</button>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <span class="toolbar-title" id="users-count">—</span>
+        <button class="btn btn-primary" onclick="toggleCreateForm()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add User
+        </button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Email</th>
+              <th>Role</th>
+              <th>Joined</th>
+              <th style="width:80px"></th>
+            </tr>
+          </thead>
+          <tbody id="users-tbody">
+            <tr><td colspan="5" class="empty-state">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- AUDIT LOG TAB -->
+    <div class="tab-pane" id="pane-audit">
+      <div class="toolbar">
+        <span class="toolbar-title" id="audit-count">—</span>
+        <button class="btn btn-ghost btn-sm" onclick="loadAudit()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.95"/></svg>
+          Refresh
+        </button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Role</th>
+              <th>Question</th>
+              <th>Blocked By</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="audit-tbody">
+            <tr><td colspan="5" class="empty-state">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+  const API = window.location.origin;
+  let _token = localStorage.getItem('admin_token') || null;
+  let _me    = (() => { try { return JSON.parse(localStorage.getItem('admin_me') || 'null'); } catch { return null; } })();
+
+  // ── Theme ──────────────────────────────────────
+  function _applyTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    const btn = document.getElementById('theme-btn');
+    if (btn) btn.textContent = t === 'dark' ? '🌙' : '☀️';
+  }
+  function toggleTheme() {
+    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    localStorage.setItem('admin_theme', next);
+    _applyTheme(next);
+  }
+  _applyTheme(localStorage.getItem('admin_theme') || 'light');
+
+  // ── Helpers ────────────────────────────────────
+  function esc(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+  function headers() {
+    const h = { 'Content-Type': 'application/json' };
+    if (_token) h['Authorization'] = 'Bearer ' + _token;
+    return h;
+  }
+  function showFlash(msg, type) {
+    const el = document.getElementById('flash');
+    el.textContent = msg;
+    el.className = 'flash show ' + type;
+    if (msg) setTimeout(() => el.classList.remove('show'), 4000);
+  }
+  function roleCls(r) { return `role-${r || 'viewer'}`; }
+
+  // ── Auth ────────────────────────────────────────
+  async function doLogin() {
+    const email    = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-password').value;
+    const btn      = document.getElementById('login-btn');
+    const errEl    = document.getElementById('login-error');
+    errEl.classList.remove('show');
+    if (!email || !password) { errEl.textContent = 'Email and password are required.'; errEl.classList.add('show'); return; }
+    btn.disabled = true; btn.textContent = 'Signing in…';
+    try {
+      const r = await fetch(`${API}/api/admin/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await r.json();
+      if (!r.ok) { errEl.textContent = data.detail || 'Login failed.'; errEl.classList.add('show'); return; }
+      _token = data.access_token;
+      _me    = data.user;
+      localStorage.setItem('admin_token', _token);
+      localStorage.setItem('admin_me', JSON.stringify(_me));
+      showApp();
+    } catch(e) {
+      errEl.textContent = 'Network error. Is the server running?'; errEl.classList.add('show');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Sign in';
+    }
+  }
+
+  function doLogout() {
+    _token = null; _me = null;
+    localStorage.removeItem('admin_token'); localStorage.removeItem('admin_me');
+    document.getElementById('app').classList.remove('show');
+    document.getElementById('login-screen').style.display = 'flex';
+    document.getElementById('login-password').value = '';
+  }
+
+  async function showApp() {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').classList.add('show');
+    document.getElementById('header-name').textContent = _me?.name || _me?.email || '—';
+    await loadUsers();
+  }
+
+  // ── Navigation ──────────────────────────────────
+  function switchTab(tab) {
+    ['users', 'audit'].forEach(t => {
+      document.getElementById(`tab-${t}`).classList.toggle('active', t === tab);
+      document.getElementById(`pane-${t}`).classList.toggle('active', t === tab);
+    });
+    if (tab === 'audit') loadAudit();
+  }
+
+  // ── Create form ─────────────────────────────────
+  function toggleCreateForm() {
+    const form = document.getElementById('create-form');
+    const show = form.classList.toggle('show');
+    if (!show) {
+      ['cf-name','cf-email','cf-password'].forEach(id => document.getElementById(id).value = '');
+      document.getElementById('cf-role').value = 'viewer';
+    }
+  }
+
+  // ── Users ───────────────────────────────────────
+  async function loadUsers() {
+    try {
+      const r = await fetch(`${API}/api/admin/users`, { headers: headers() });
+      if (r.status === 401 || r.status === 403) { doLogout(); return; }
+      const data = await r.json();
+      renderUsers(data.users || []);
+    } catch(e) {
+      document.getElementById('users-tbody').innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load users.</td></tr>';
+    }
+  }
+
+  function renderUsers(users) {
+    document.getElementById('users-count').textContent = `${users.length} user${users.length !== 1 ? 's' : ''}`;
+    document.getElementById('stat-total').textContent = users.length;
+    document.getElementById('stat-execs').textContent = users.filter(u => ['admin','executive'].includes(u.role)).length;
+    document.getElementById('stat-restricted').textContent = users.filter(u => ['manager','viewer'].includes(u.role)).length;
+
+    const tbody = document.getElementById('users-tbody');
+    if (!users.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No users found.</td></tr>'; return; }
+    tbody.innerHTML = users.map(u => {
+      const isMe = u.id === _me?.id;
+      return `<tr>
+        <td>
+          <strong>${esc(u.name)}</strong>
+          ${isMe ? '<span class="you-badge">you</span>' : ''}
+        </td>
+        <td style="color:var(--muted);font-size:0.82rem">${esc(u.email)}</td>
+        <td>
+          <select class="role-select ${roleCls(u.role)}"
+            onchange="setRole(${u.id}, this)"
+            ${isMe ? 'disabled title="Cannot change your own role"' : ''}>
+            <option value="viewer"    ${u.role==='viewer'    ?'selected':''}>Viewer</option>
+            <option value="manager"   ${u.role==='manager'   ?'selected':''}>Manager</option>
+            <option value="executive" ${u.role==='executive' ?'selected':''}>Executive</option>
+            <option value="admin"     ${u.role==='admin'     ?'selected':''}>Admin</option>
+          </select>
+        </td>
+        <td style="color:var(--muted);font-size:0.82rem;white-space:nowrap">${fmtDate(u.created_at)}</td>
+        <td>
+          ${isMe ? '' : `<button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},'${esc(u.email)}')">Delete</button>`}
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function setRole(userId, selectEl) {
+    const role = selectEl.value;
+    selectEl.className = `role-select ${roleCls(role)}`;
+    try {
+      const r = await fetch(`${API}/api/admin/users/${userId}`, {
+        method: 'PATCH', headers: headers(), body: JSON.stringify({ role }),
+      });
+      const data = await r.json();
+      if (!r.ok) { showFlash(data.detail || 'Failed to update role.', 'error'); await loadUsers(); return; }
+      showFlash(`Role updated to "${role}".`, 'success');
+    } catch(e) { showFlash('Network error.', 'error'); await loadUsers(); }
+  }
+
+  async function deleteUser(userId, email) {
+    if (!confirm(`Delete "${email}"? This cannot be undone.`)) return;
+    try {
+      const r = await fetch(`${API}/api/admin/users/${userId}`, { method: 'DELETE', headers: headers() });
+      const data = await r.json();
+      if (!r.ok) { showFlash(data.detail || 'Failed to delete user.', 'error'); return; }
+      showFlash(`"${email}" deleted.`, 'success');
+      await loadUsers();
+    } catch(e) { showFlash('Network error.', 'error'); }
+  }
+
+  async function createUser() {
+    const name     = document.getElementById('cf-name').value.trim();
+    const email    = document.getElementById('cf-email').value.trim();
+    const password = document.getElementById('cf-password').value;
+    const role     = document.getElementById('cf-role').value;
+    if (!name || !email || !password) { showFlash('All fields are required.', 'error'); return; }
+    const btn = document.getElementById('cf-btn');
+    btn.disabled = true; btn.textContent = 'Creating…';
+    try {
+      const r = await fetch(`${API}/api/admin/users`, {
+        method: 'POST', headers: headers(), body: JSON.stringify({ name, email, password, role }),
+      });
+      const data = await r.json();
+      if (!r.ok) { showFlash(data.detail || 'Failed to create user.', 'error'); return; }
+      showFlash(`"${email}" created as ${role}.`, 'success');
+      toggleCreateForm();
+      await loadUsers();
+    } catch(e) { showFlash('Network error.', 'error'); }
+    finally { btn.disabled = false; btn.textContent = 'Create User'; }
+  }
+
+  // ── Audit Log ───────────────────────────────────
+  async function loadAudit() {
+    const tbody = document.getElementById('audit-tbody');
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Loading…</td></tr>';
+    try {
+      const r = await fetch(`${API}/api/admin/audit?limit=100`, { headers: headers() });
+      if (r.status === 401 || r.status === 403) { doLogout(); return; }
+      const data = await r.json();
+      const logs = data.logs || [];
+      document.getElementById('audit-count').textContent = `${logs.length} recent block${logs.length !== 1 ? 's' : ''}`;
+      if (!logs.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No blocked queries recorded yet.</td></tr>'; return; }
+      tbody.innerHTML = logs.map(l => `<tr>
+        <td>
+          <strong>${esc(l.name || '')}</strong><br>
+          <span style="color:var(--muted);font-size:0.75rem">${esc(l.email || '')}</span>
+        </td>
+        <td><span class="role-badge ${roleCls(l.role)}">${esc(l.role)}</span></td>
+        <td class="audit-q" title="${esc(l.question || '')}">${esc((l.question||'').slice(0,80))}${(l.question||'').length>80?'…':''}</td>
+        <td><span class="blocked-tag">${esc(l.blocked_by || '')}</span></td>
+        <td style="color:var(--muted);font-size:0.78rem;white-space:nowrap">${fmtTime(l.created_at)}</td>
+      </tr>`).join('');
+    } catch(e) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Network error.</td></tr>';
+    }
+  }
+
+  // ── Init ────────────────────────────────────────
+  if (_token && _me?.role === 'admin') {
+    showApp();
+  } else {
+    _token = null; _me = null;
+    document.getElementById('login-screen').style.display = 'flex';
+  }
+</script>
+</body>
+</html>

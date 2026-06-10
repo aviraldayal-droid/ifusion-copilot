@@ -12,6 +12,7 @@ PATCH  /api/v1/conversations/{conv_id}/title       — update title
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -26,6 +27,7 @@ from app.db.auth_store import (
     update_conversation_title,
 )
 
+log = logging.getLogger("tbg.conv")
 router = APIRouter(prefix="/api/v1/conversations", tags=["conversations"])
 
 
@@ -52,6 +54,7 @@ async def _require_ownership(conv_id: int, user_id: int) -> dict:
     if conv is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
     if conv["user_id"] != user_id:
+        log.warning("ownership check failed: conv_id=%s user_id=%s owner_id=%s", conv_id, user_id, conv["user_id"])
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
     return conv
 
@@ -64,6 +67,7 @@ async def _require_ownership(conv_id: int, user_id: int) -> dict:
 async def list_user_conversations(current_user: dict = Depends(get_current_user)):
     """Return all conversations for the authenticated user, newest first."""
     convs = await asyncio.to_thread(list_conversations, current_user["id"])
+    log.debug("list_conversations: user_id=%s count=%d", current_user["id"], len(convs))
     return {"conversations": convs}
 
 
@@ -76,6 +80,7 @@ async def create_user_conversation(
     conv = await asyncio.to_thread(
         create_conversation, current_user["id"], body.title, body.mode
     )
+    log.info("create_conversation: id=%s user_id=%s mode=%s title=%r", conv["id"], current_user["id"], body.mode, body.title)
     return conv
 
 
@@ -87,6 +92,7 @@ async def get_conversation_messages(
     """Return all messages in a conversation (must be owned by the caller)."""
     await _require_ownership(conv_id, current_user["id"])
     msgs = await asyncio.to_thread(list_messages, conv_id)
+    log.debug("get_messages: conv_id=%s user_id=%s count=%d", conv_id, current_user["id"], len(msgs))
     return {"conversation_id": conv_id, "messages": msgs}
 
 
@@ -99,6 +105,7 @@ async def delete_user_conversation(
     deleted = await asyncio.to_thread(delete_conversation, conv_id, current_user["id"])
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+    log.info("delete_conversation: conv_id=%s user_id=%s", conv_id, current_user["id"])
 
 
 @router.patch("/{conv_id}/title")
@@ -110,4 +117,5 @@ async def update_title(
     """Update the title of a conversation."""
     await _require_ownership(conv_id, current_user["id"])
     await asyncio.to_thread(update_conversation_title, conv_id, body.title)
+    log.info("update_title: conv_id=%s user_id=%s title=%r", conv_id, current_user["id"], body.title)
     return {"conv_id": conv_id, "title": body.title}

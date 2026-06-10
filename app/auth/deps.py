@@ -69,6 +69,13 @@ async def get_current_user(token: str | None = Depends(oauth2_scheme)) -> dict:
     return user
 
 
+async def require_admin_user(current_user: dict = Depends(get_current_user)) -> dict:
+    """Raises HTTP 403 if the authenticated user does not have the admin role."""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required.")
+    return current_user
+
+
 async def get_optional_user(token: str | None = Depends(oauth2_scheme)) -> dict | None:
     """
     Like get_current_user but returns None instead of raising on auth failure.
