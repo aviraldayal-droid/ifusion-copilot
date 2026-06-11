@@ -2167,7 +2167,7 @@
     </div>
     <div class="topbar-right">
       <select id="model-select" class="compact-select" title="Select model"><option value="">Loading…</option></select>
-      <select id="language-select" class="compact-select" title="Language">
+      <select id="language-select" class="compact-select" title="Language" onchange="_onLanguageChange()">
         <option value="en">EN</option>
         <option value="fr">FR</option>
       </select>
@@ -2558,6 +2558,117 @@
     checkApiKeyStatus();
   }
 
+  // ── Silent token refresh ─────────────────────────────────────────────────
+  // Vanilla-JS analog of the axios-interceptor pattern: decode the JWT
+  // client-side, check `exp`, and POST /auth/refresh when it's close to
+  // expiring so an active user never sees a surprise re-login.
+  //
+  // The local JWT is HS256 with claims { sub, email, sid, iat, exp }. We only
+  // peek at `exp` here — verification still happens server-side. Anyone can
+  // forge a JWT with any `exp`; the backend rejects it via signature check.
+
+  function _decodeJwtPayload(token) {
+    if (!token) return null;
+    try {
+      const parts = token.split('.');
+      if (parts.length !== 3) return null;
+      // Base64url → base64 → JSON
+      const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const padded = b64 + '==='.slice((b64.length + 3) % 4);
+      return JSON.parse(atob(padded));
+    } catch { return null; }
+  }
+
+  function _tokenExpSec(token) {
+    const p = _decodeJwtPayload(token);
+    return (p && typeof p.exp === 'number') ? p.exp : null;
+  }
+
+  function _isTokenNearExpiry(token, bufferSec = 60) {
+    const exp = _tokenExpSec(token);
+    if (exp === null) return false;
+    return (exp - Math.floor(Date.now() / 1000)) < bufferSec;
+  }
+
+  // Single in-flight refresh promise — coalesces concurrent callers so we
+  // never fire two /refresh requests at once when a burst of API calls all
+  // notice the token is expiring at the same instant.
+  let _refreshInFlight = null;
+
+  async function _refreshAuthToken() {
+    if (_refreshInFlight) return _refreshInFlight;
+    if (!_authToken) return null;
+    _refreshInFlight = (async () => {
+      try {
+        const r = await fetch(`${API}/api/v1/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + _authToken },
+        });
+        if (!r.ok) throw new Error(`refresh failed: HTTP ${r.status}`);
+        const body = await r.json();
+        if (!body.access_token) throw new Error('refresh: no token in response');
+        _setAuth(body.access_token, body.user || _authUser);
+        return body.access_token;
+      } finally {
+        _refreshInFlight = null;
+      }
+    })();
+    return _refreshInFlight;
+  }
+
+  // Ensure the in-memory _authToken is fresh enough to send. Call before any
+  // API request that needs to survive a long-running session.
+  async function _ensureFreshToken(bufferSec = 60) {
+    if (!_authToken) return null;
+    if (!_isTokenNearExpiry(_authToken, bufferSec)) return _authToken;
+    try {
+      return await _refreshAuthToken();
+    } catch (err) {
+      console.warn('Token refresh failed, will fall through to existing token:', err);
+      return _authToken;
+    }
+  }
+
+  // Drop-in wrapper around fetch() for new code: auto-refreshes the token if
+  // it's close to expiry, attaches the Authorization header, and retries once
+  // on a 401 (in case the token expired between the check and the request).
+  async function _apiFetch(url, opts = {}) {
+    await _ensureFreshToken(60);
+    const headers = Object.assign({}, opts.headers || {});
+    if (_authToken && !headers['Authorization']) {
+      headers['Authorization'] = 'Bearer ' + _authToken;
+    }
+    let r = await fetch(url, { ...opts, headers });
+    if (r.status === 401 && _authToken) {
+      // Token may have expired mid-flight; try a forced refresh + one retry.
+      const fresh = await _refreshAuthToken().catch(() => null);
+      if (fresh) {
+        const retryHeaders = Object.assign({}, opts.headers || {}, {
+          'Authorization': 'Bearer ' + fresh,
+        });
+        r = await fetch(url, { ...opts, headers: retryHeaders });
+      }
+    }
+    return r;
+  }
+
+  // Background heartbeat: every minute, refresh if the token expires in the
+  // next 5 minutes. This keeps an idle-but-open tab logged in indefinitely
+  // (until the user closes it or the underlying account is disabled server-
+  // side and the next refresh 401s).
+  let _refreshTimer = null;
+  function _startTokenRefreshTimer() {
+    if (_refreshTimer) return;
+    _refreshTimer = setInterval(() => {
+      if (_authToken && _isTokenNearExpiry(_authToken, 300)) {
+        _refreshAuthToken().catch(err => console.warn('background refresh:', err));
+      }
+    }, 60_000);
+  }
+  function _stopTokenRefreshTimer() {
+    if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+  }
+
   function _updateUserUI() {
     const infoEl  = document.getElementById('sb-user-info');
     const nameEl  = document.getElementById('sb-user-name');
@@ -2709,6 +2820,7 @@
   }
 
   function logOut() {
+    _stopTokenRefreshTimer();
     _setAuth(null, null);
     _authUser     = null;
     _authToken    = null;
@@ -2789,16 +2901,25 @@
     _consumeKeycloakCallbackToken();
     _refreshAuthConfig();
     if (!_authToken) { showAuthModal(); return; }
+
+    // If we restored an old token from localStorage that's already on the
+    // verge of expiring, refresh it eagerly before the first API call so
+    // /auth/me doesn't 401 and bounce the user back to the login modal.
+    if (_isTokenNearExpiry(_authToken, 60)) {
+      await _refreshAuthToken().catch(() => {});
+    }
+
     try {
       const r = await fetch(`${API}/api/v1/auth/me`, { headers: { 'Authorization': 'Bearer ' + _authToken } });
-      if (!r.ok) { _setAuth(null, null); showAuthModal(); return; }
+      if (!r.ok) { _setAuth(null, null); _stopTokenRefreshTimer(); showAuthModal(); return; }
       _authUser = await r.json();
       _setAuth(_authToken, _authUser);
       hideAuthModal();
       _updateUserUI();
+      _startTokenRefreshTimer();
       await loadConversationsFromApi();
     } catch (_) {
-      _setAuth(null, null); showAuthModal();
+      _setAuth(null, null); _stopTokenRefreshTimer(); showAuthModal();
     }
   }
 
@@ -3139,6 +3260,53 @@
 
   function _renderExcelView() {
     const msgs = document.getElementById('messages');
+    const lang = document.getElementById('language-select')?.value || 'en';
+    const FR = lang === 'fr';
+
+    // Bilingual labels + agent prompts. Chip label is what the user sees;
+    // the string in askText(...) is what gets sent to the LLM.
+    const S = FR ? {
+      loaded:      'chargé',
+      meta:        (n) => `${n} feuille${n > 1 ? 's' : ''} analysée${n > 1 ? 's' : ''} · posez vos questions en anglais ou en français · les chiffres proviennent directement du classeur`,
+      g_revenue:   'Chiffre d’affaires & Rentabilité',
+      g_subs:      'Abonnés (Parc Mobile)',
+      g_costs:     'Coûts & CAPEX',
+      g_alerts:    'Anomalies & Graphiques',
+      c_rev_label: 'CA vs Budget',         c_rev_q:  'Quel est le chiffre d’affaires de décembre 2025 par rapport au budget ?',
+      c_ebi_label: 'Tendance EBITDA 2025', c_ebi_q:  'Montre la tendance de l’EBITDA pour 2025',
+      c_gap_label: 'Plus gros écarts budgétaires', c_gap_q: 'Quels mois ont eu le plus grand écart par rapport au budget ?',
+      c_act_label: 'Abonnés actifs',       c_act_q:  'Total des abonnés mobiles actifs en décembre 2025',
+      c_pre_label: 'Activations prépayées',c_pre_q:  'Combien d’activations prépayées en décembre 2025 ?',
+      c_gen_label: 'Répartition 2G / 3G / 4G', c_gen_q: 'Compare les abonnés 2G, 3G et 4G',
+      c_cap_label: 'Dépassement CAPEX',    c_cap_q:  'Où avons-nous dépassé le budget CAPEX en 2025 ?',
+      c_opx_label: 'Principaux postes OPEX', c_opx_q: 'Principaux postes OPEX par rapport au budget',
+      c_per_label: 'Coûts du personnel',   c_per_q:  'Tendance des coûts du personnel pour 2025',
+      c_low_label: 'Alertes sous budget',  c_low_q:  'Affiche toutes les métriques significativement en dessous du budget',
+      c_cf_label:  'Graphique cash-flow',  c_cf_q:   'Trace le graphique des flux de trésorerie pour 2025',
+      c_pl_label:  'Variance complète du P&L', c_pl_q: 'Effectue une analyse complète de variance sur le P&L de décembre',
+      tip:         (n) => `<strong>Astuce :</strong> ${n} feuille${n > 1 ? 's contiennent' : ' contient'} des métriques portant le même nom dans différentes sous-sections (ex. Prépayé vs Postpayé). Utilisez le bouton <strong>Champs</strong> pour épingler celle que vous souhaitez.`,
+    } : {
+      loaded:      'loaded',
+      meta:        (n) => `${n} sheet${n > 1 ? 's' : ''} parsed · ask in English or French · numbers come straight from the workbook`,
+      g_revenue:   'Revenue &amp; Profitability',
+      g_subs:      'Subscribers (Parc Mobile)',
+      g_costs:     'Costs &amp; CAPEX',
+      g_alerts:    'Anomalies &amp; Charts',
+      c_rev_label: 'Revenue vs budget',    c_rev_q:  'What is the December 2025 revenue vs budget?',
+      c_ebi_label: 'EBITDA trend 2025',    c_ebi_q:  'Show the EBITDA trend for 2025',
+      c_gap_label: 'Biggest budget gaps',  c_gap_q:  'Which months had the biggest gap vs budget?',
+      c_act_label: 'Active subscribers',   c_act_q:  'Total active mobile subscribers in December 2025',
+      c_pre_label: 'Prepaid activations',  c_pre_q:  'How many prepaid activations in December 2025?',
+      c_gen_label: '2G / 3G / 4G split',   c_gen_q:  'Compare 2G, 3G and 4G subscribers',
+      c_cap_label: 'CAPEX overspend',      c_cap_q:  'Where did we overspend on CAPEX in 2025?',
+      c_opx_label: 'Top OPEX drivers',     c_opx_q:  'Top OPEX drivers vs budget',
+      c_per_label: 'Personnel costs',      c_per_q:  'Personnel costs trend for 2025',
+      c_low_label: 'Below-budget alerts',  c_low_q:  'Show me all metrics significantly below budget',
+      c_cf_label:  'Cash flow chart',      c_cf_q:   'Plot the cash flow chart for 2025',
+      c_pl_label:  'Full P&amp;L variance',c_pl_q:   'Run a full variance analysis on the P&L for December',
+      tip:         (n) => `<strong>Tip:</strong> ${n} sheet${n > 1 ? 's have' : ' has'} metrics with the same name in different sub-sections (e.g. Prépayé vs Postpayé). Use the <strong>Fields</strong> button to pin the exact one you mean.`,
+    };
+
     if (activeSessionId) {
       // File loaded — show a structured ready banner with starter prompts
       const fileName = activeSessionFiles[0] || 'TBG file';
@@ -3147,46 +3315,46 @@
       msgs.innerHTML = `
         <div class="msg-spacer" id="msg-spacer"></div>
         <div class="excel-ready-banner">
-          <div class="excel-ready-title">${escHtml(fileName)} loaded</div>
-          <div class="excel-ready-meta">${sheetsCount} sheet${sheetsCount > 1 ? 's' : ''} parsed · ask in English or French · numbers come straight from the workbook</div>
+          <div class="excel-ready-title">${escHtml(fileName)} ${S.loaded}</div>
+          <div class="excel-ready-meta">${S.meta(sheetsCount)}</div>
 
           <div class="excel-starter-group">
-            <div class="excel-starter-title">Revenue &amp; Profitability</div>
+            <div class="excel-starter-title">${S.g_revenue}</div>
             <div class="excel-starter-chips">
-              <span class="excel-starter-chip" onclick="askText('What is the December 2025 revenue vs budget?')">Revenue vs budget</span>
-              <span class="excel-starter-chip" onclick="askText('Show the EBITDA trend for 2025')">EBITDA trend 2025</span>
-              <span class="excel-starter-chip" onclick="askText('Which months had the biggest gap vs budget?')">Biggest budget gaps</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_rev_q)})">${S.c_rev_label}</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_ebi_q)})">${S.c_ebi_label}</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_gap_q)})">${S.c_gap_label}</span>
             </div>
           </div>
 
           <div class="excel-starter-group">
-            <div class="excel-starter-title">Subscribers (Parc Mobile)</div>
+            <div class="excel-starter-title">${S.g_subs}</div>
             <div class="excel-starter-chips">
-              <span class="excel-starter-chip" onclick="askText('Total active mobile subscribers in December 2025')">Active subscribers</span>
-              <span class="excel-starter-chip" onclick="askText('How many prepaid activations in December 2025?')">Prepaid activations</span>
-              <span class="excel-starter-chip" onclick="askText('Compare 2G, 3G and 4G subscribers')">2G / 3G / 4G split</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_act_q)})">${S.c_act_label}</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_pre_q)})">${S.c_pre_label}</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_gen_q)})">${S.c_gen_label}</span>
             </div>
           </div>
 
           <div class="excel-starter-group">
-            <div class="excel-starter-title">Costs &amp; CAPEX</div>
+            <div class="excel-starter-title">${S.g_costs}</div>
             <div class="excel-starter-chips">
-              <span class="excel-starter-chip" onclick="askText('Where did we overspend on CAPEX in 2025?')">CAPEX overspend</span>
-              <span class="excel-starter-chip" onclick="askText('Top OPEX drivers vs budget')">Top OPEX drivers</span>
-              <span class="excel-starter-chip" onclick="askText('Personnel costs trend for 2025')">Personnel costs</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_cap_q)})">${S.c_cap_label}</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_opx_q)})">${S.c_opx_label}</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_per_q)})">${S.c_per_label}</span>
             </div>
           </div>
 
           <div class="excel-starter-group">
-            <div class="excel-starter-title">Anomalies &amp; Charts</div>
+            <div class="excel-starter-title">${S.g_alerts}</div>
             <div class="excel-starter-chips">
-              <span class="excel-starter-chip" onclick="askText('Show me all metrics significantly below budget')">Below-budget alerts</span>
-              <span class="excel-starter-chip" onclick="askText('Plot the cash flow chart for 2025')">Cash flow chart</span>
-              <span class="excel-starter-chip" onclick="askText('Run a full variance analysis on the P&L for December')">Full P&amp;L variance</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_low_q)})">${S.c_low_label}</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_cf_q)})">${S.c_cf_label}</span>
+              <span class="excel-starter-chip" onclick="askText(${JSON.stringify(S.c_pl_q)})">${S.c_pl_label}</span>
             </div>
           </div>
 
-          ${dupSheets > 0 ? `<div class="excel-tip" style="margin-top:10px"><strong>Tip:</strong> ${dupSheets} sheet${dupSheets > 1 ? 's have' : ' has'} metrics with the same name in different sub-sections (e.g. Prépayé vs Postpayé). Use the <strong>Fields</strong> button to pin the exact one you mean.</div>` : ''}
+          ${dupSheets > 0 ? `<div class="excel-tip" style="margin-top:10px">${S.tip(dupSheets)}</div>` : ''}
         </div>`;
     } else {
       // No file — explanatory upload CTA
@@ -3235,6 +3403,15 @@
             <span class="excel-sample-chip" onclick="_excelChipClick(this,'Compare prepaid vs postpaid activations')">Prepaid vs Postpaid</span>
           </div>
         </div>`;
+    }
+  }
+
+  // Re-render the excel banner when the user flips EN <-> FR.
+  // Only safe to re-render when no conversation has started yet — otherwise we'd
+  // wipe out user/assistant messages already on screen.
+  function _onLanguageChange() {
+    if (_activeMode === 'excel' && !document.querySelector('.msg.user')) {
+      _renderExcelView();
     }
   }
 
@@ -4054,19 +4231,32 @@
     const isOrdered   = l => /^\s*\d+\./.test(l);
     const isTableRow  = l => l.includes('|');
     const isSeparator = l => /^[-|+: ]+$/.test(l) && (l.includes('-') || l.includes('+'));
-    // Detect named report-section labels emitted by the formatter LLM
-    const isSectionHdr = l => /^\*\*(Summary|Analysis|Key Insights|Quarterly Trend|Tendance Trimestrielle|R[eé]sum[eé]|Analyse|Points Cl[eé]s)\*\*\s*$/i.test(l.trim());
-    const isDataSource = l => /^\*\*(Data Source|Source de donn[eé]es)\*\*:/i.test(l.trim());
+    // Named report-section labels emitted by the formatter LLM.
+    // The file-upload agent emits these as `## Heading`; the DB pipeline emits
+    // them as `**Heading**`. We match either form so styling stays consistent
+    // across both flows, in both English and French.
+    const SECTION_NAMES = /^(?:Summary|Answer|Analysis|Visualisation|Visualization|Key Insights|Insights\s*(?:&|and)?\s*Next\s*Step|Quarterly Trend|Trend Signal|R[eé]sum[eé]|R[eé]ponse|Analyse|Aper[cç]us(?:\s+(?:cl[eé]s|et\s+prochaine\s+[eé]tape))?|Tendance\s+[Tt]rimestrielle|Signal\s+de\s+tendance|Points\s+Cl[eé]s)$/i;
+    const sectionHdrLabel = l => {
+      const t = l.trim();
+      const m1 = t.match(/^\*\*([^*]+)\*\*\s*$/);
+      if (m1 && SECTION_NAMES.test(m1[1].trim())) return m1[1].trim();
+      const m2 = t.match(/^#{1,3}\s+(.+)$/);
+      if (m2 && SECTION_NAMES.test(m2[1].trim())) return m2[1].trim();
+      return null;
+    };
+    const isDataSource = l => /^\*\*(Data Source|Source de donn[eé]es|Source des donn[eé]es)\*\*:/i.test(l.trim());
 
     while (i < lines.length) {
       const line = lines[i], trimmed = line.trim();
       if (!trimmed) { i++; continue; }
       if (/^[-*]{3,}$/.test(trimmed)) { html += `<hr class="md-hr">`; i++; continue; }
 
-      // Named section headers
-      if (isSectionHdr(trimmed)) {
-        const label = trimmed.replace(/\*\*/g, '');
-        html += `<div class="md-section-hdr">${escHtml(label)}</div>`; i++; continue;
+      // Named section headers (matches both **Heading** and ## Heading forms)
+      {
+        const label = sectionHdrLabel(trimmed);
+        if (label) {
+          html += `<div class="md-section-hdr">${escHtml(label)}</div>`; i++; continue;
+        }
       }
 
       // Data Source bar
@@ -4172,7 +4362,7 @@
       while (i < lines.length) {
         const l = lines[i], lt = l.trim();
         if (!lt) { i++; break; }
-        if (lt.match(/^#{1,3}\s/) || isLi(lt) || isTableRow(lt) || lt.startsWith('```') || isSectionHdr(lt) || isDataSource(lt) || lt.match(/^\*\*(Insight|Source|Follow-?up)\*\*:/i)) break;
+        if (lt.match(/^#{1,3}\s/) || isLi(lt) || isTableRow(lt) || lt.startsWith('```') || sectionHdrLabel(lt) || isDataSource(lt) || lt.match(/^\*\*(Insight|Source|Follow-?up)\*\*:/i)) break;
         paraLines.push(lt); i++;
       }
       if (paraLines.length) html += `<p>${inlineMd(paraLines.join(' '))}</p>`;

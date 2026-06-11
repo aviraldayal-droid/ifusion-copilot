@@ -128,6 +128,35 @@ async def me(current_user: dict = Depends(get_current_user)):
     }
 
 
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh(current_user: dict = Depends(get_current_user)):
+    """
+    Silent-refresh endpoint: mint a fresh JWT for an already-authenticated user.
+
+    The frontend calls this when the current token is close to expiry so the
+    user's session doesn't die mid-conversation. Works for users from either
+    provider (local password OR Keycloak) since the JWT shape is identical.
+
+    NOTE: we deliberately do NOT rotate session_token here. Rotation happens
+    on /login and /keycloak/callback (where it intentionally invalidates other
+    devices, per current "one active session" behavior). A /refresh just
+    extends the same session — otherwise refreshing in one tab would 401
+    every other open tab via the sid check in get_current_user.
+    """
+    sid   = current_user.get("session_token") or ""
+    token = create_access_token(current_user["id"], current_user["email"], sid)
+    log.debug("refresh: user_id=%s email=%s", current_user["id"], current_user["email"])
+    return TokenResponse(
+        access_token=token,
+        user={
+            "id":    current_user["id"],
+            "email": current_user["email"],
+            "name":  current_user["name"],
+            "role":  current_user.get("role", "viewer"),
+        },
+    )
+
+
 class SetRoleRequest(BaseModel):
     email: str
     role:  str = Field(..., pattern="^(admin|executive|manager|viewer)$")

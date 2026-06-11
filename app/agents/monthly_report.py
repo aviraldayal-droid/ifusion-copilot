@@ -80,13 +80,13 @@ def _fetch_data() -> dict[str, Any]:
                 ROUND(d.budget_value::numeric,  0)       AS budget,
                 ROUND(d.last_year_real_value::numeric, 0) AS prior_year,
                 CASE WHEN d.budget_value IS NOT NULL AND d.budget_value <> 0
-                     THEN ROUND((d.real_value - d.budget_value) * 100.0
-                                / ABS(d.budget_value), 1)
+                     THEN ROUND(((d.real_value - d.budget_value) * 100.0
+                                 / ABS(d.budget_value))::numeric, 1)
                      ELSE NULL END                       AS vs_budget_pct,
                 CASE WHEN d.last_year_real_value IS NOT NULL
                           AND d.last_year_real_value <> 0
-                     THEN ROUND((d.real_value - d.last_year_real_value) * 100.0
-                                / ABS(d.last_year_real_value), 1)
+                     THEN ROUND(((d.real_value - d.last_year_real_value) * 100.0
+                                 / ABS(d.last_year_real_value))::numeric, 1)
                      ELSE NULL END                       AS yoy_pct
         FROM    dedup d
         JOIN    financial_metric     fm ON fm.id = d.financial_metric_id
