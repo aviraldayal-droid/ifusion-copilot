@@ -46,25 +46,28 @@ uploads/
 *.xlsx
 *.xls
 
-# Eval artifacts
-eval_results*.csv
-eval_cat*.csv
-eval_details.jsonl
-eval_report_*.md
-eval_category_analysis.md
+# Eval artifacts — anchored to root only so docs/archived/* copies survive
+/eval_results*.csv
+/eval_cat*.csv
+/eval_details.jsonl
+/eval_report_*.md
+/eval_category_analysis.md
 
 # Generated docs / schema dumps
-schema_doc.md
-schema_files/
+/schema_doc.md
+/schema_files/
 
 # Misc project files not needed in repo
 =*
-today_tasks.txt
-benchmark_questions.txt
-screenshots/
-videos/
-*.docx
-tbg_ai_output.txt
+/today_tasks.txt
+/benchmark_questions.txt
+/screenshots/
+/videos/
+/*.docx
+/tbg_ai_output.txt
+
+# Historical artifacts intentionally checked in for posterity:
+# docs/archived/ files are NOT ignored even when their root-level twins are.
 
 # Docker
 *.env.docker
