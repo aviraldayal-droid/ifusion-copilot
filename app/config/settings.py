@@ -1,6 +1,8 @@
 import os
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Per-request Ollama API key — set by route handlers, read by _make_llm().
@@ -13,8 +15,11 @@ request_user_role: ContextVar[str] = ContextVar("request_user_role", default="vi
 
 # Per-request user identity — set by route handlers, read by the pipeline
 # to write activity into the per-user log file.
-request_user_id:    ContextVar[int | None] = ContextVar("request_user_id",    default=None)
-request_user_email: ContextVar[str]        = ContextVar("request_user_email", default="")
+# NOTE: use Optional[int] (not `int | None`) so this evaluates on Python 3.9 too;
+# ContextVar's type subscript is evaluated at runtime, not deferred by
+# `from __future__ import annotations`.
+request_user_id:    ContextVar[Optional[int]] = ContextVar("request_user_id",    default=None)
+request_user_email: ContextVar[str]           = ContextVar("request_user_email", default="")
 
 # Compute .env search paths at module level so Docker shallow paths work.
 # Local: /home/.../tbg_copilot/tb/app/config/settings.py → parents 2,3,4 all valid.
