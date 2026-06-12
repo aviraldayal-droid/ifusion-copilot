@@ -4008,6 +4008,31 @@
     return { text, specs };
   }
 
+  // Deep-dedupe chart specs by canonicalized content. The agent sometimes
+  // emits the same spec twice — once via generate_chart_spec (lands in
+  // payload.charts) and once inline as JSON in the response text (extracted
+  // by _extractInlineChartSpecs). Object-key order may differ between the
+  // two emissions, so canonicalize (sort keys recursively) before hashing.
+  function _canonicalizeForDedup(obj) {
+    if (obj === null || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map(_canonicalizeForDedup);
+    const sorted = {};
+    for (const k of Object.keys(obj).sort()) sorted[k] = _canonicalizeForDedup(obj[k]);
+    return sorted;
+  }
+  function _dedupChartSpecs(specs) {
+    if (!Array.isArray(specs) || specs.length < 2) return specs || [];
+    const seen = new Set();
+    const out  = [];
+    for (const s of specs) {
+      let key;
+      try { key = JSON.stringify(_canonicalizeForDedup(s)); }
+      catch { out.push(s); continue; }
+      if (!seen.has(key)) { seen.add(key); out.push(s); }
+    }
+    return out;
+  }
+
   function _makeShowChartsBtn(specs) {
     const btn = document.createElement('button');
     btn.className = 'show-charts-btn';
@@ -4405,8 +4430,10 @@
       </div>`;
     wrap.appendChild(div);
     const bubble = div.querySelector('.bubble');
-    // Merge tool-provided charts with any inline specs the LLM wrote in the text
-    const allCharts = [...(charts || []), ...inlineSpecs];
+    // Merge tool-provided charts with any inline specs the LLM wrote in the
+    // text, then dedupe — the LLM often emits the same chart twice (once via
+    // generate_chart_spec, once inline as JSON), and we want one button.
+    const allCharts = _dedupChartSpecs([...(charts || []), ...inlineSpecs]);
     if (allCharts.length > 0) {
       const btn = _makeShowChartsBtn(allCharts);
       bubble.appendChild(btn);
@@ -4813,7 +4840,9 @@
               streamBubble.innerHTML = renderBotText(_cleanText);
             }
             const bubble = streamBubble ? streamBubble.closest('.bubble') : null;
-            const mergedCharts = [...(payload.charts || []), ..._inlineSpecs];
+            // Dedup: tool charts + inline specs may overlap when the LLM emits
+            // the same chart both ways. Keep the first occurrence of each.
+            const mergedCharts = _dedupChartSpecs([...(payload.charts || []), ..._inlineSpecs]);
             if (mergedCharts.length > 0 && bubble) {
               bubble.appendChild(_makeShowChartsBtn(mergedCharts));
             }

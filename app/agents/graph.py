@@ -318,6 +318,46 @@ def _build_system_prompt(parsed_data: dict, language: str = "en") -> str:
         "If the user writes in French, translate your answer into English anyway — leave no French words."
     )
 
+    # Clarifying-question templates — bilingual. The LLM is instructed to copy
+    # these verbatim, so the template literal itself must be in the active
+    # language (otherwise the model copies the English text and the user sees
+    # English mid-French conversation).
+    if is_fr:
+        tpl_clarify_sheet_q      = "Pour quelle feuille souhaitez-vous cette analyse ? Voici les options disponibles :"
+        tpl_clarify_sheet_reply  = "Répondez avec le numéro, ou nommez directement la feuille / métrique."
+        tpl_clarify_metric_q     = "Quelle métrique de [Nom de la feuille] souhaitez-vous analyser ? Voici les options disponibles :"
+        tpl_clarify_metric_reply = "Répondez avec le numéro, ou tapez directement le nom de la métrique."
+        tpl_scope_refusal = (
+            "Je ne peux répondre qu'à des questions concernant le classeur TBG (Tableau de Bord de Gestion) "
+            "de Moov Benin — métriques financières, analyse de variance, graphiques et KPI. "
+            "Votre question est en dehors de ce périmètre.\n\n"
+            "Essayez plutôt :\n"
+            "  • « Quel est le chiffre d'affaires de décembre 2025 par rapport au budget ? »\n"
+            "  • « Montre la tendance de l'EBITDA pour 2025 »\n"
+            "  • « Quelles catégories OPEX ont dépassé le plan ? »"
+        )
+        tpl_cross_sheet_q      = "« [LABEL] » apparaît dans [N] feuilles de ce classeur et a une signification différente dans chacune. Laquelle souhaitez-vous ?"
+        tpl_cross_sheet_reply  = "Répondez avec le numéro, ou utilisez le menu Feuille de la barre Périmètre pour l'épingler."
+        tpl_within_sheet_q     = "Votre question mentionne « [LABEL] », mais cette étiquette apparaît dans [COUNT] sous-sections de la feuille [SHEET]. Laquelle souhaitez-vous ?"
+        tpl_within_sheet_reply = "Répondez avec le numéro, ou utilisez la barre Périmètre / le bouton Champs pour épingler votre choix."
+    else:
+        tpl_clarify_sheet_q      = "Which sheet would you like this analysis for? Here are the available options:"
+        tpl_clarify_sheet_reply  = "Reply with the number, or name the sheet/metric directly."
+        tpl_clarify_metric_q     = "Which metric within [Sheet Name] would you like to analyse? Here are the available options:"
+        tpl_clarify_metric_reply = "Reply with the number, or type the metric name directly."
+        tpl_scope_refusal = (
+            "I can only help with questions about the TBG (Tableau de Bord de Gestion) workbook for Moov Benin — "
+            "financial metrics, variance analysis, charts, and KPIs. Your question is outside that scope.\n\n"
+            "Try asking something like:\n"
+            "  • \"What is December 2025 revenue vs budget?\"\n"
+            "  • \"Show the EBITDA trend for 2025\"\n"
+            "  • \"Which OPEX categories overshot the plan?\""
+        )
+        tpl_cross_sheet_q      = "\"[LABEL]\" appears in [N] sheets of this workbook and means different things in each. Which one do you mean?"
+        tpl_cross_sheet_reply  = "Reply with the number, or use the Scope bar's Sheet dropdown to pin it."
+        tpl_within_sheet_q     = "Your question mentions \"[LABEL]\", but this label appears in [COUNT] sub-sections of the [SHEET] sheet. Which one do you mean?"
+        tpl_within_sheet_reply = "Reply with the number, or use the Scope bar / Fields button to pin your choice."
+
     # Build numbered sheet list for vague-question clarification template
     _key_to_display = {v: k.strip() for k, v in SHEETS_OF_INTEREST.items()}
     sheets_numbered = "\n".join(
@@ -376,11 +416,11 @@ When the user asks for broad analysis (e.g. "which months had the biggest gap vs
 Output the clarification using EXACTLY this template — copy the structure verbatim, including the question line, the blank line, the numbered list (one option per line, no extra text on the option lines), and the final "Reply with..." instruction. The numbered list MUST appear directly after the question line so the UI can render it as clickable buttons.
 
 ```
-Which sheet would you like this analysis for? Here are the available options:
+{tpl_clarify_sheet_q}
 
 {sheets_numbered}
 
-Reply with the number, or name the sheet/metric directly.
+{tpl_clarify_sheet_reply}
 ```
 
 STRICT RULES — VIOLATING ANY OF THESE BREAKS THE UI:
@@ -406,14 +446,14 @@ When the user has named or selected a specific sheet but NOT a specific metric (
 2. Present them as a numbered list using EXACTLY this template:
 
 ```
-Which metric within [Sheet Name] would you like to analyse? Here are the available options:
+{tpl_clarify_metric_q}
 
 1. [Metric label 1]
 2. [Metric label 2]
 3. [Metric label 3]
 …
 
-Reply with the number, or type the metric name directly.
+{tpl_clarify_metric_reply}
 ```
 
 Do NOT ask in free text with examples in parentheses like "(e.g. Total Trafic sortant, Trafic entrant, ...)". Always use a numbered list so the user can click an option. Keep the list to the 15 most relevant metrics if the sheet has many.
@@ -437,12 +477,7 @@ Examples of questions you MUST refuse:
 For off-topic questions, do NOT call any tool. Respond with EXACTLY this template (one short paragraph, no other content):
 
 ```
-I can only help with questions about the TBG (Tableau de Bord de Gestion) workbook for Moov Benin — financial metrics, variance analysis, charts, and KPIs. Your question is outside that scope.
-
-Try asking something like:
-  • "What is December 2025 revenue vs budget?"
-  • "Show the EBITDA trend for 2025"
-  • "Which OPEX categories overshot the plan?"
+{tpl_scope_refusal}
 ```
 
 If the question is ambiguous (e.g. "What is EBITDA?"), treat it as a request for the value from this workbook (call query_metric for EBITDA) — NOT as a general definition. Only define a term if the user explicitly asks "what does X mean" or "define X".
@@ -462,13 +497,13 @@ This rule applies to BOTH definition-style ("What is X?") AND data-query questio
 When the user's question mentions a label from the CROSS-SHEET list above AND they did not name a sheet AND `metric_hints` is empty, you MUST stop and ask which sheet first. Do NOT call any tool. Do NOT pick a default. Do NOT output the standard Answer / Analysis sections. Output ONLY this clarifying question:
 
 ```
-"[LABEL]" appears in [N] sheets of this workbook and means different things in each. Which one do you mean?
+{tpl_cross_sheet_q}
 
 1. [Sheet display name] — [section], code [CODE]
 2. [Sheet display name] — [section], code [CODE]
 …(continue for ALL options listed in the CROSS-SHEET table)
 
-Reply with the number, or use the Scope bar's Sheet dropdown to pin it.
+{tpl_cross_sheet_reply}
 ```
 
 Even if the question is phrased as a definition ("What is EBITDA?", "Define Chiffre d'affaires"), you MUST ask — because the user might want the definition tied to a specific sheet's value (e.g. P&L EBITDA is profit; Cash conso EBITDA is a cash-flow starting line).
@@ -487,14 +522,14 @@ When the user mentions one of the labels above AND `metric_hints` is empty AND t
 3. Use this exact template (replace the bracketed placeholders):
 
 ```
-Your question mentions "[LABEL]", but this label appears in [COUNT] sub-sections of the [SHEET] sheet. Which one do you mean?
+{tpl_within_sheet_q}
 
 1. [SUB-SECTION 1 verbatim]
 2. [SUB-SECTION 2 verbatim]
 3. [SUB-SECTION 3 verbatim]
 …(continue numbering until you have listed ALL [COUNT] entries)
 
-Reply with the number, or use the Scope bar / Fields button to pin your choice.
+{tpl_within_sheet_reply}
 ```
 
 4. Skip the standard Answer / Analysis / Visualisation / Insights format on clarifying-question turns.
